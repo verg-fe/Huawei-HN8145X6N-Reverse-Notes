@@ -507,7 +507,7 @@ lowerdir=/opt/upt/framework/saf/rootfs,upperdir=/opt/upt/apps/apps,workdir=/opt/
    ```assembly
    ldrb    r3, [r3]
    cmp     r3, #0
-   beq     loc_return_empty       ; "Args" 字段指针若为空或首字节为  ，直接返回空串退出！
+   beq     loc_return_empty       ; "Args" 字段指针若为空或首字节为 \0，直接返回空串退出！
    ```
 5. **进程派生**：当参数满足条件，系统调用 GLib 库的底层特权进程生成函数 `g_subprocess_newv`，**以 Root（UID 0）身份直接启动外部脚本**！
 
@@ -551,7 +551,7 @@ loc_12784:                          ; 校验 Args 参数指针与非空约束
     beq     loc_return_empty        ; 参数为空直接抛弃
     ldrb    r2, [r3]
     cmp     r2, #0
-    beq     loc_return_empty        ; 首字节为   抛弃
+    beq     loc_return_empty        ; 首字节为 \0 抛弃
 
 loc_12810:                          ; 构建 argv 并特权派生外部脚本
     mov     r0, r6
