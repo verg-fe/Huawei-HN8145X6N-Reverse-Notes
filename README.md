@@ -14,22 +14,22 @@
 
 ```mermaid
 graph TD
-    subgraph 华为双层软件架构
-        subgraph 宿主域: Dopra Linux (uClibc)
-            DOPRA_KER[Linux Kernel 5.10.0 SMP ARMv7]
-            DOPRA_SHELL[受限调试壳 srv_clid / UID 3030]
-            DOPRA_WAN[PPPoE 路由与硬件交换芯片驱动]
-            DOPRA_MOD[运营商内核监管模块: m01_b01.ko]
+    subgraph ARCH ["华为双层软件架构"]
+        subgraph HOST ["宿主域: Dopra Linux (uClibc)"]
+            DOPRA_KER["Linux Kernel 5.10.0 SMP ARMv7"]
+            DOPRA_SHELL["受限调试壳 srv_clid / UID 3030"]
+            DOPRA_WAN["PPPoE 路由与硬件交换芯片驱动"]
+            DOPRA_MOD["运营商内核监管模块: m01_b01.ko"]
         end
-        subgraph 容器域: SAF OpenWrt Runtime (musl)
-            LXC[LXC Container Engine / OverlayFS]
-            APPMGR[/sbin/appmgr / UID 0 核心特权守护进程]
-            PROCD[/sbin/procd 进程管理器]
-            PLUGINS[外挂业务: wifiaudit / b01odm / xrobot / qoe]
+        subgraph CONT ["容器域: SAF OpenWrt Runtime (musl)"]
+            LXC["LXC Container Engine / OverlayFS"]
+            APPMGR["/sbin/appmgr / UID 0 核心特权守护进程"]
+            PROCD["/sbin/procd 进程管理器"]
+            PLUGINS["外挂业务: wifiaudit / b01odm / xrobot / qoe"]
         end
     end
     DOPRA_KER <--> LXC
-    APPMGR <-->|D-Bus 系统总线: system_bus_socket| DOPRA_SHELL
+    APPMGR <-->|"D-Bus 系统总线: system_bus_socket"| DOPRA_SHELL
 ```
 
 该系统呈现出典型的三重防御纵深：
@@ -64,7 +64,7 @@ graph TD
 
 ```mermaid
 flowchart TD
-    subgraph 假设检验与路径证伪
+    subgraph HYP ["假设检验与路径证伪"]
         H1["假设1: SSH Pubkey 解析器栈溢出"] --> V1["逆向 strnlen 截断与 Base64 字典校验"] --> R1["证伪: 格式异常即刻阻断，无内存破坏原语"]
         H2["假设2: 物理替换 m01_b01.ko 驱动文件劫持启动"] --> V2["静态审计 b01odm 守护逻辑与 m01_sig.bin"] --> R2["证伪: RSA 公钥验签哈希，异常直接触发系统 Watchdog 重启"]
         H3["假设3: 依赖传统'装备测试模式'开壳"] --> V3["实测产测模式状态机切换与驱动卸载"] --> R3["灾难: 退出后PPPoE无法拨号断网、驱动碰撞Kernel Panic、后门被重置回受限壳"]
@@ -102,9 +102,9 @@ beq     loc_reject
 
 ```mermaid
 flowchart TD
-    subgraph 传统使能升级包 duit9rr.sh 真实执行链
-        BIN[推送 r23_all_shell.bin] --> TAR[解压 equipment.tar.gz]
-        TAR --> SH[执行 duit9rr.sh 部署脚本]
+    subgraph LEGACY ["传统使能升级包 duit9rr.sh 真实执行链"]
+        BIN["推送 r23_all_shell.bin"] --> TAR["解压 equipment.tar.gz"]
+        TAR --> SH["执行 duit9rr.sh 部署脚本"]
         SH --> STEP1["代码 L310: EquipMode.sh on (强切产线装备模式)"]
         SH --> STEP2["代码 L68: HW_Script_ClearBoardinfo (清空板卡参数)"]
         SH --> STEP3["代码 L320: rm -f /mnt/jffs2/xpon_mode (抹除上行模式)"]
@@ -195,23 +195,23 @@ ProcDataWh -g -f /mnt/jffs2/hw_boardinfo
 
 ```mermaid
 flowchart TD
-    subgraph 华为两阶段受限壳与真实破局矩阵
-        subgraph 阶段一: 未加升级包 / 纯出厂在网状态
-            S1_SSH[SSH 端口 22 / Dropbear] --> S1_AUTH[双因子认证: 默认账号 + LOID]
-            S1_AUTH --> S1_WAP[进入非特权字符菜单: WAP>]
-            S1_WAP --> S1_SU[su 切换: SU_WAP>]
+    subgraph MATRIX ["华为两阶段受限壳与真实破局矩阵"]
+        subgraph S1 ["阶段一: 未加升级包 / 纯出厂在网状态"]
+            S1_SSH["SSH 端口 22 / Dropbear"] --> S1_AUTH["双因子认证: 默认账号 + LOID"]
+            S1_AUTH --> S1_WAP["进入非特权字符菜单: WAP>"]
+            S1_WAP --> S1_SU["su 切换: SU_WAP>"]
             S1_SU --> S1_DEAD["输入 shell / id / ls / busybox"]
             S1_DEAD --> S1_REJECT["绝对死局: Command is not existed (无 Linux 壳)"]
         end
-        subgraph 阶段二: 盲目推送民间升级包 (r23_all_shell.bin)
-            S2_BIN[组播推送升级包] --> S2_TAR[释放 hw_shell_cli.xml 与 duit9rr.sh]
-            S2_TAR --> S2_TELNET[激活 23 端口 Telnet / 注册 shell 指令]
+        subgraph S2 ["阶段二: 盲目推送民间升级包 (r23_all_shell.bin)"]
+            S2_BIN["组播推送升级包"] --> S2_TAR["释放 hw_shell_cli.xml 与 duit9rr.sh"]
+            S2_TAR --> S2_TELNET["激活 23 端口 Telnet / 注册 shell 指令"]
             S2_TELNET --> S2_PROMPT["输入 shell 获得: WAP(Dopra Linux) #"]
             S2_PROMPT --> S2_CMD["输入 id / ps / mount / /bin/busybox"]
             S2_CMD --> S2_TRAP["伪壳陷阱: ERROR::Input para is not right (srv_clid 拦截)"]
             S2_TAR --> S2_DISASTER["触发 duit9rr.sh: 强启装备模式 / 抹除 xpon_mode / 断网 / 内核雪崩"]
         end
-        subgraph 真实破局: 双轨绝杀实录
+        subgraph REAL ["真实破局: 双轨绝杀实录"]
             BREAK1["破局通道 1 (伪壳词法展开逃逸)"] --> P1["利用内建 echo 漏洞: 未过滤 $(...) 命令替换"]
             P1 --> P1_WIN["单行击穿: echo $(任意Root命令 2>&1)"]
             BREAK2["破局通道 2 (在网纯净状态 D-Bus 穿透)"] --> P2["挖掘原生私有原语: ctrgcmd plugin method List"]
@@ -726,7 +726,7 @@ insmod: can't insert 'ring0_gate.ko': module PLT section(s) missing
 
 ```mermaid
 flowchart TD
-    subgraph 灾后业务全链路复活与持久化闭环
+    subgraph RECOVERY ["灾后业务全链路复活与持久化闭环"]
         DUMP["前置脱库底牌: router_full_credentials_backup.json"] --> ASSETS["提取 LOID (LOID_8888****) / 账号 (USER_AA22****) / VLAN 41"]
         ASSETS --> STEP1["第一步: 光链路重绑 (LOID 逻辑标识认证)"]
         STEP1 --> OLT_OK["OLT 握手鉴权成功: PON_STATUS_OPERATION"]
@@ -807,7 +807,7 @@ doc.getElementById('btnApply_ex2').click();                 // 触发后端 wan.
 
 ```mermaid
 flowchart TD
-    subgraph 现场问题排查与修复链
+    subgraph TROUBLESHOOT ["现场问题排查与修复链"]
         P1["现象: 用户拨动开关后，UI 瞬间回弹关闭 / 按钮无响应"] --> D1["抓取 uiautomator 与底层 logcat 调试"]
         D1 --> R1["发现: 调试 Shell 运行于容器沙箱，系统缺少宿主 iptables 二进制"]
         R1 --> R2["影响: status 状态回显为空，解析逻辑判定当前全部功能处于未开启状态"]
