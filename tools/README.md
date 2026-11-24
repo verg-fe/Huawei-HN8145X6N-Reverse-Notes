@@ -60,6 +60,7 @@
 | **`get_pwr` / `get_pwr.c`** | Hi1152 DMAC 微码实时功率表探针 | 静态链接 ARMv7 EABI 工具（调用 ioctl `0x8beb` / `wal_ioctl_get_current_power`），强制海思芯片微码将每阶 MCS 实际生效功率表 printk 打印至 dmesg，彻底打破 `/proc/vap0/sta_info` 硬编码的假 20dBm 迷局。 |
 | **`alg_ctl` / `alg_ctl.c`** | 海思底层射频算法与 TPC 硬件调优客户端 | 静态链接 ARMv7 EABI 工具（调用 ioctl `0x8bfd` / `wal_iwpriv_char_extra_adapt`），直接与芯片微码 ALG 模块交互，实时读取/设定 TPC 硬件码字、功率补偿、温控阈值与信道校准。 |
 | **`hi1152_rf_tuner.ko` / `hi1152_rf_tuner.c`** | 纯射频校准与 PCIe SRAM 调参内核模块 | 独立自包含 ARMv7 LKM，暴露 `/proc/hi1152_rf_tuner`，通过 `oal_pcie_devca_to_hostva` 直通映射并同步更新宿主 `g_dev_custom_info + 0x28` 与单芯片 DBDC `chip0` SRAM `0x1b2830 + 0x28` 中的 `cali_ofdm_max_pwr` 阈值，突破原厂 23.0/22.0 dBm 软钳位上限（严格保留原厂过温保护不变）。 |
+| **`rf_probe` / `rf_probe.c`** | Hi1152 实时芯片结温与功率基准探针 | 静态零依赖 ARMv7 EABI WEXT ioctl 探针，直调 `wal_ioctl_get_param`（`0x8be1` / `0x02b9` -> `wal_ioctl_get_temp`）读取片上实时结温（°C）、`get_txpower`（`0x0071`）及 `wal_ioctl_get_stru_param`（`0x8be7` / `0x02ca`）回读 412 字节 `get_pwr_ref` 微码参考功率数组。 |
 | **`run_ont_script.py`** | 临时 HTTP (8888) 投递与远程 SSH 执行一体化套件 | 动态拉起 8888 临时投递服务，通过 SSH 引导光猫执行 `busybox wget` 下载并执行脚本，执行完自动释放端口与日志。 |
 | **`ONT_V100R002C00SPC253.exe`** | 华为原厂 ONT 维修与组播使能工具 | 通过 PC 物理网口（配置 `192.168.100.2`），利用 TFTP/FTP 组播协议向冷启动的光猫广播推送固件包 `r23_all_shell.bin`。 |
 | **`HW_Dollar2.exe`** | 华为光猫开小贝壳 / Shell 开启辅助工具 | 用于老版本固件在 LAN 侧通过特定请求激活命令解释器。 |
