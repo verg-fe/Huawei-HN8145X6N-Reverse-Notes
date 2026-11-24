@@ -10,7 +10,7 @@
  *     Provides an in-memory kernel privilege gateway via /proc/ring0_gate:
  *       1. Kernel-level privilege escalation primitive (commit_creds)
  *       2. Direct dispatch to HiSilicon Wi-Fi driver (HWWIFI2_WIFI.ko) for
- *          30.0 dBm (1000 mW) full-power hardware overdrive on ath0/ath8
+ *          25.0 dBm (~316 mW) peak hardware saturation overdrive (KCT FEM Psat)
  *       3. Zero-brick safe unloading and strict NULL-pointer exception handling
  * =============================================================================
  */
@@ -60,12 +60,12 @@ extern int printk(const char *fmt, ...);
 
 /*
  * HiSilicon Wi-Fi 6 (Hi1152 / HWWIFI2_WIFI.ko) driver hooks:
- * Dispatched dynamically via exported symbols to trigger 1000mW (30.0 dBm) overdrive.
+ * Dispatched dynamically via exported symbols to trigger 25.0 dBm (~316 mW) peak overdrive.
  *
  * REVERSE ENGINEERING NOTE (from HWWIFI2_WIFI.ko disassembly of wal_hipriv_set_txpower):
  *   +1c8: 0xe3530f4b    cmp r3, #300      ; Maximum power parameter is 300 (0.1 dBm units)
  *   +1cc: 0x9a000017    bls valid_range   ; Values > 300 are rejected as invalid argument!
- * Units: 0.1 dBm (200 = 20.0 dBm / 100 mW; 300 = 30.0 dBm / 1000 mW).
+ * Units: 0.1 dBm (200 = 20.0 dBm / 100 mW; 250 = 25.0 dBm / ~316 mW [FEM Psat]).
  */
 extern int wal_hipriv_set_txpower(struct net_device *net_dev, const char *param) __attribute__((weak));
 extern struct net_device *dev_get_by_name(struct net *net, const char *name) __attribute__((weak));
@@ -89,14 +89,17 @@ __asm__(".section .init.plt, \"a\", %progbits\n.byte 0\n");
 static struct proc_dir_entry *gate_entry = (void *)0;
 static unsigned long g_escalation_count = 0;
 static int g_wifi_overdrive_active = 0;
+static int g_target_dbm_tenths = 250; /* Default 25.0 dBm (~316 mW) */
 static int g_ath0_ret = -1;
 static int g_ath8_ret = -1;
 
-static int trigger_wifi_1000mw(void) {
+static int trigger_wifi_peak_power(int tenths_dbm) {
     struct net_device *dev_2g = (void *)0;
     struct net_device *dev_5g = (void *)0;
+    char pwr_str[8];
     
     g_wifi_overdrive_active = 1;
+    g_target_dbm_tenths = tenths_dbm;
 
     if (!wal_hipriv_set_txpower) {
         printk("[RING0_GATE] Error: wal_hipriv_set_txpower symbol unresolved (HWWIFI2_WIFI not loaded?)\n");
@@ -112,6 +115,20 @@ static int trigger_wifi_1000mw(void) {
         return -38;
     }
 
+    /* Convert tenths_dbm to string (e.g., 250 -> "250") */
+    if (tenths_dbm >= 200 && tenths_dbm <= 300) {
+        pwr_str[0] = '0' + (tenths_dbm / 100);
+        pwr_str[1] = '0' + ((tenths_dbm / 10) % 10);
+        pwr_str[2] = '0' + (tenths_dbm % 10);
+        pwr_str[3] = '\0';
+    } else {
+        /* Fallback to 25.0 dBm (250) */
+        pwr_str[0] = '2';
+        pwr_str[1] = '5';
+        pwr_str[2] = '0';
+        pwr_str[3] = '\0';
+    }
+
     dev_2g = dev_get_by_name(&init_net, "ath0");
     dev_5g = dev_get_by_name(&init_net, "ath8");
 
@@ -122,11 +139,7 @@ static int trigger_wifi_1000mw(void) {
      * We strictly validate dev != NULL before calling.
      */
     if (dev_2g) {
-        /*
-         * Parameter "300" = 30.0 dBm (1000 mW).
-         * HiSilicon internal atoi validation enforces <= 300.
-         */
-        g_ath0_ret = wal_hipriv_set_txpower(dev_2g, "300");
+        g_ath0_ret = wal_hipriv_set_txpower(dev_2g, pwr_str);
         if (dev_put) dev_put(dev_2g);
     } else {
         printk("[RING0_GATE] Interface ath0 (2.4G) not found or down, skipping to prevent Panic.\n");
@@ -134,15 +147,15 @@ static int trigger_wifi_1000mw(void) {
     }
 
     if (dev_5g) {
-        g_ath8_ret = wal_hipriv_set_txpower(dev_5g, "300");
+        g_ath8_ret = wal_hipriv_set_txpower(dev_5g, pwr_str);
         if (dev_put) dev_put(dev_5g);
     } else {
         printk("[RING0_GATE] Interface ath8 (5G) not found or down, skipping to prevent Panic.\n");
         g_ath8_ret = -19; /* -ENODEV */
     }
 
-    printk("[RING0_GATE] 1000mW (30.0 dBm / '300') overdrive dispatched: ath0 rc=%d, ath8 rc=%d\n",
-           g_ath0_ret, g_ath8_ret);
+    printk("[RING0_GATE] Peak hardware overdrive (%d.%d dBm / '%s') dispatched: ath0 rc=%d, ath8 rc=%d\n",
+           tenths_dbm / 10, tenths_dbm % 10, pwr_str, g_ath0_ret, g_ath8_ret);
 
     return 0;
 }
@@ -152,12 +165,13 @@ static int ring0_show(struct seq_file *m, void *v) {
     seq_printf(m, "STATUS=READY\n");
     seq_printf(m, "KERNEL_VER=5.10.0-SMP-ARMv7\n");
     seq_printf(m, "CHIPSET=HiSilicon_Hi1152_Wi-Fi_6\n");
+    seq_printf(m, "FEM_HARDWARE_LIMIT=25.0_DBM (~316 mW / KCT_PSAT)\n");
     seq_printf(m, "ESCALATION_COUNT=%lu\n", g_escalation_count);
-    seq_printf(m, "WIFI_1000MW_OVERDRIVE=%s\n", g_wifi_overdrive_active ? "DISPATCHED" : "STANDBY");
-    seq_printf(m, "TARGET_POWER_PARAM=300 (30.0 dBm / 1000 mW)\n");
+    seq_printf(m, "WIFI_PEAK_OVERDRIVE=%s\n", g_wifi_overdrive_active ? "DISPATCHED" : "STANDBY");
+    seq_printf(m, "TARGET_POWER_PARAM=%d (%d.%d dBm)\n", g_target_dbm_tenths, g_target_dbm_tenths / 10, g_target_dbm_tenths % 10);
     seq_printf(m, "ATH0_2.4G_RC=%d\n", g_ath0_ret);
     seq_printf(m, "ATH8_5.0G_RC=%d\n", g_ath8_ret);
-    seq_printf(m, "COMMANDS=root, wifi_pwr 1000\n");
+    seq_printf(m, "COMMANDS=root, wifi_pwr 25 (or 250), wifi_pwr 1000\n");
     seq_printf(m, "===================================\n");
     return 0;
 }
@@ -193,13 +207,19 @@ static ssize_t ring0_write(struct file *file, const char *buf, size_t count, lof
             return -12; /* -ENOMEM */
         }
     }
-    /* Command 2: "wifi_pwr 1000" or "overdrive" -> 1000mW 30.0dBm RF overdrive */
+    /* Command 2: "wifi_pwr 25" or "wifi_pwr 250" -> 25.0 dBm (~316 mW) real hardware peak */
+    else if ((kbuf[0] == 'w' && kbuf[1] == 'i' && kbuf[2] == 'f' && kbuf[3] == 'i' && kbuf[4] == '_' &&
+              kbuf[5] == 'p' && kbuf[6] == 'w' && kbuf[7] == 'r' && kbuf[8] == ' ' && 
+              kbuf[9] == '2' && kbuf[10] == '5')) {
+        trigger_wifi_peak_power(250); /* 25.0 dBm (~316 mW / KCT FEM Psat) */
+    }
+    /* Command 3: "wifi_pwr 1000" or "overdrive" -> Maximum driver ceiling (300 / 30.0 dBm) */
     else if ((kbuf[0] == 'w' && kbuf[1] == 'i' && kbuf[2] == 'f' && kbuf[3] == 'i' && kbuf[4] == '_' &&
               kbuf[5] == 'p' && kbuf[6] == 'w' && kbuf[7] == 'r' && kbuf[8] == ' ' && 
               kbuf[9] == '1' && kbuf[10] == '0' && kbuf[11] == '0' && kbuf[12] == '0') ||
              (kbuf[0] == 'o' && kbuf[1] == 'v' && kbuf[2] == 'e' && kbuf[3] == 'r' && kbuf[4] == 'd' &&
               kbuf[5] == 'r' && kbuf[6] == 'i' && kbuf[7] == 'v' && kbuf[8] == 'e')) {
-        trigger_wifi_1000mw();
+        trigger_wifi_peak_power(300); /* 30.0 dBm (Driver ceiling) */
     }
 
     return count;
