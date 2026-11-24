@@ -1184,18 +1184,28 @@ LAN1.X_HW_L3Enable=1&LAN2.X_HW_L3Enable=1&LAN3.X_HW_L3Enable=1&LAN4.X_HW_L3Enabl
    Channel bandwidth             :160 MHz (Standard: 11ax, Max Rate: 2402 M)
    ----------------------------------------------------
    ```
-4. **内核提权网关与海思 Wi-Fi 1000mW (30 dBm) 满血驱动激发**：
-   在此期间，我们构建的自包含内核驱动 `ring0_gate.ko` 稳定常驻运行。除了提供基础的 `root` 瞬态提权能力外，针对大平层全屋强信号覆盖需求，模块还通过动态挂钩海思无线闭源驱动（`HWWIFI2_WIFI.ko`）导出的 `wal_hipriv_set_txpower` 底层私有调试接口，实现了对物理硬件的极限增益注入：
-   ```text
-   STATUS=READY
-   KERNEL_VER=5.10.0-SMP-ARMv7
-   CHIPSET=HiSilicon_Hi1152_Wi-Fi_6
-   WIFI_1000MW_OVERDRIVE=ACTIVE_30DBM
-   ATH0_2.4G_RC=0
-   ATH8_5.0G_RC=0
-   COMMANDS=root, wifi_pwr 1000
-   ```
-   向 `/proc/ring0_gate` 写入指令 `wifi_pwr 1000` 时，内核网关自动解析 2.4G 网卡（`ath0`）与 5G 网卡（`ath8`）的设备结构体，直接调用海思内部接口下发 **30 dBm（即 1000 mW 满血功率指标）**。海思 DMAC 固件接收后清零内部数字衰减器（0dB），促使板载外置射频前端芯片（康希通信 KCT8575 / KCT8547 高功率 FEM）进入全功率饱和放大状态，彻底突破了 SRRC 默认 100mW 的软件功耗墙，达成了在网实测信号爆表、全屋满格穿墙的硬件满血覆盖！
+4. **内核提权网关与海思 Wi-Fi 功率接口逆向挂钩 (PoC 原型)**：
+   在获得 Ring 0 内核执行上下文后，针对无线射频底层控制链路，我们展开了对海思闭源驱动 `HWWIFI2_WIFI.ko`（海思凌霄 Hi1152 架构）的深入静态逆向与驱动级符号联动：
+   - **汇编级逆向证据 (`wal_hipriv_set_txpower` 偏移 `+0x1c8`)**：
+     反汇编海思驱动内部的参数校验逻辑发现关键指令：
+     ```arm
+     +1c8: 0xe3530f4b    cmp r3, #300      ; 校验输入整数是否 <= 300 (0x12c)
+     +1cc: 0x9a000017    bls valid_range   ; 若 <= 300，进入有效参数下发分支
+                         b   invalid_arg   ; 若 > 300，报错 invalid argument!
+     ```
+     **关键发现**：海思底层以 0.1 dBm 为步进单位，上限硬编码为 `300`（即 30.0 dBm，科学换算对应 1000 mW 标称值）。传入 `"30"` 会被误认为 3.0 dBm（2 mW），必须传入字符串 `"300"` 才能正确被解析为 30.0 dBm 请求。
+   - **严谨的防御性内核编程**：
+     海思驱动内部入口直接通过 `net_dev->priv` 访问私有结构。为防止网卡未就绪时传 NULL 引发内核 Panic（Data Abort），我们在 `ring0_gate_v2.c` 中实施了严格的判空守卫：
+     ```c
+     if (dev_2g) {
+         g_ath0_ret = wal_hipriv_set_txpower(dev_2g, "300");
+         if (dev_put) dev_put(dev_2g);
+     } else {
+         g_ath0_ret = -19; /* -ENODEV: 严格阻断 NULL 传参 */
+     }
+     ```
+   - **工程客观定界与物理边界说明**：
+     需要严谨说明的是，此接口属于驱动级 PoC 调试挂钩。软件下发 30.0 dBm 指令可解除 SRRC 100mW 的软件限制并清零驱动内部数字衰减器，但最终实际物理有效辐射功率受限于板载外置 FEM（康希通信 KCT8575 / KCT8547）的硬件饱和功率（$P_{	ext{sat}}$）以及 1024-QAM EVM 线性度。过大的偏置输出可能导致信号非线性失真，实际有效覆盖需依托外部专业场强仪做进一步量化标定。
 
 ---
 

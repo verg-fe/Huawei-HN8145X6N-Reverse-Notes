@@ -7,9 +7,9 @@
 ## 0x01 文件清单
 * **`ring0_gate_v2.c`**：自包含内核模块 C 源码。实现 `/proc/ring0_gate` 特权接口，提供：
   1. 用户态进程在内核态的 `commit_creds(prepare_kernel_cred(NULL))` 瞬态提权通道；
-  2. 真实联动海思无线驱动（`HWWIFI2_WIFI.ko`）导出接口，对 2.4G (`ath0`) 与 5G (`ath8`) 下发 30 dBm (1000 mW) 满血硬件激发指令。
+  2. 严格遵循内核空指针安全防护的驱动联动原语，向海思 Wi-Fi 驱动（`HWWIFI2_WIFI.ko`）注入 30.0 dBm (1000 mW 标称值，内部参数 `"300"`) 极限功率请求。
 * **`build_ring0_v2.py`**：无内核树跨平台编译构建脚本。利用 Clang 交叉编译器直接编译出符合目标内核加载器要求的 ARMv7 单目标文件。
-* **`ring0_gate.ko`**：编译产出的自包含 LKM 二进制文件（~6.6 KB）。
+* **`ring0_gate.ko`**：编译产出的自包含 LKM 二进制文件（~7.0 KB）。
 
 ---
 
@@ -20,7 +20,7 @@
 2. **`CONFIG_ARM_MODULE_PLTS` 校验失败**：ARMv7 内核的 `module_frob_arch_sections()` 强制断言 `.plt` 和 `.init.plt` 节区必须存在，否则拒绝为超出跳转范围的符号重定位分配跳转桩，直接返回 `-ENOEXEC`；
 3. **`struct module` 结构体校验崩溃**：内核加载器在解析 `.gnu.linkonce.this_module` 节区时，会严格按照目标内核的结构体内存对齐读取模块名称、`init` 函数指针和 `exit` 函数指针。一旦偏移错位，会导致内核跳入非法地址引发 Kernel Panic。
 
-### 优雅的编译器级绕过解法：
+### 编译器级内联解法：
 无需编写脆弱复杂的后处理 ELF 二进制重写工具，本项目采用纯编译器特性直接解决：
 1. **节区伪装声明**：
    ```c
@@ -43,7 +43,7 @@
    ```
    并将其实例化在 `.gnu.linkonce.this_module` 节区中。
 3. **体积与内存驻留数据**：
-   - 静态 ELF 磁盘文件体积：~6.6 KB；
+   - 静态 ELF 磁盘文件体积：~7.0 KB；
    - 内核内存物理驻留尺寸：约 5,195 字节（`lsmod` 报告的实际内存分配页面大小）。
 
 ---
@@ -60,23 +60,33 @@
 
 ---
 
-## 0x04 海思 Wi-Fi 6 驱动联动与 1000mW (30 dBm) 硬件满血激发
+## 0x04 海思 Wi-Fi 6 驱动逆向实证与功率参数解析
 
-在目标设备上，Wi-Fi 射频输出功率默认受国家无线电管理委员会（SRRC）强制法规限制（2.4GHz 限制在 20 dBm / 100 mW 以内，并加注了高额数字衰减）。
+### 1. 海思 `wal_hipriv_set_txpower` 汇编级逆向证据
+通过静态逆向光猫闭源无线驱动 `HWWIFI2_WIFI.ko`（海思凌霄 Hi1152 架构），我们定位并反汇编了内部私有接口 `wal_hipriv_set_txpower`（节区偏移 `0x1d97d4`）：
+```arm
+; HWWIFI2_WIFI.ko: wal_hipriv_set_txpower 参数校验逻辑 (偏移 +0x1c8)
++1c8: 0xe3530f4b    cmp r3, #300      ; 校验解析出的整数是否 <= 300 (0x12c)
++1cc: 0x9a000017    bls valid_range   ; 若 <= 300，进入有效参数下发分支
+                    b   invalid_arg   ; 若 > 300，打印 "invalid argument!" 并返回失败
+```
 
-为了达成大平层全屋强信号覆盖的实测需求，`ring0_gate_v2.c` 实现了与海思 Wi-Fi 闭源驱动（`HWWIFI2_WIFI.ko`）的真实底层联动：
-1. **真实符号动态解析**：
-   通过弱引用绑定海思驱动导出的核心调试接口：
-   ```c
-   extern int wal_hipriv_set_txpower(struct net_device *net_dev, const char *param) __attribute__((weak));
-   extern struct net_device *dev_get_by_name(struct net *net, const char *name) __attribute__((weak));
-   extern void dev_put(struct net_device *dev) __attribute__((weak));
-   ```
-2. **硬件全功率注入原语**：
-   向 `/proc/ring0_gate` 写入指令 `wifi_pwr 1000` 或 `overdrive` 时，模块自动获取 2.4G 网卡（`ath0`）与 5G 网卡（`ath8`）的设备结构体，直接调用海思内部私有通信接口下发 **30 dBm（换算即为 1000 mW 满血功率指标）**：
-   ```c
-   wal_hipriv_set_txpower(dev_2g, "30");
-   wal_hipriv_set_txpower(dev_5g, "30");
-   ```
-3. **物理激励效果**：
-   海思 DMAC 固件接收到 30 dBm 指令后，清零内部数字衰减器（0dB），促使板载外置射频前端芯片（康希通信 KCT8575 / KCT8547 高功率 FEM）进入全功率饱和放大状态，实现全屋满格穿墙覆盖！
+**关键技术发现**：
+* **参数单位为 0.1 dBm**：驱动内部以 0.1 dBm 为步进单位，上限严格卡在 `300`（即 30.0 dBm，科学换算对应 1000 mW 理论上限）；
+* **传参修正**：若错误传入 `"30"`，驱动将解析为 3.0 dBm（约 2 mW，导致发射功率衰减 98%）；必须显式传入 `"300"`，驱动才识别为 30.0 dBm 满血请求！
+
+### 2. 内核严谨性：空指针防御与引用安全
+在早期原型中，若网卡不存在直接传 NULL 会导致驱动内部解引用 `net_dev->priv` 发生 Data Abort。`ring0_gate_v2.c` 实施了严格的防御性编程：
+```c
+if (dev_2g) {
+    g_ath0_ret = wal_hipriv_set_txpower(dev_2g, "300");
+    if (dev_put) dev_put(dev_2g);
+} else {
+    g_ath0_ret = -19; /* -ENODEV: 严格阻断 NULL 传参，避免 Kernel Panic */
+}
+```
+
+### 3. 工程客观定界：软件解除限制 vs 硬件物理边界
+必须以严谨的工程态度指出：
+1. **依赖前置**：模块通过弱符号调用海思驱动接口，前提是系统已成功加载 `HWWIFI2_WIFI.ko`；
+2. **硬件物理天花板**：软件注入 30.0 dBm（300）指令可清零海思内部数字衰减器，促使外置 FEM（康希通信 KCT8575 / KCT8547）进入高增益输出。但实际物理有效辐射功率受限于板载 FEM 的饱和功率（$P_{\text{sat}}$）与散热条件，过高的驱动偏置可能导致 1024-QAM EVM 恶化。本模块提供底层驱动级的全功率调试原语，实际物理表现需结合外部功率计与场强仪综合标定。

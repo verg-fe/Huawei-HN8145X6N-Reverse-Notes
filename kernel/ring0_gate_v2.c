@@ -10,8 +10,8 @@
  *     Provides an in-memory kernel privilege gateway via /proc/ring0_gate:
  *       1. Kernel-level privilege escalation primitive (commit_creds)
  *       2. Direct dispatch to HiSilicon Wi-Fi driver (HWWIFI2_WIFI.ko) for
- *          1000mW (30 dBm) full-power hardware overdrive on ath0/ath8
- *       3. Zero-brick safe unloading and exception handling
+ *          30.0 dBm (1000 mW) full-power hardware overdrive on ath0/ath8
+ *       3. Zero-brick safe unloading and strict NULL-pointer exception handling
  * =============================================================================
  */
 
@@ -60,7 +60,12 @@ extern int printk(const char *fmt, ...);
 
 /*
  * HiSilicon Wi-Fi 6 (Hi1152 / HWWIFI2_WIFI.ko) driver hooks:
- * Dispatched dynamically via exported symbols to trigger 1000mW (30 dBm) overdrive.
+ * Dispatched dynamically via exported symbols to trigger 1000mW (30.0 dBm) overdrive.
+ *
+ * REVERSE ENGINEERING NOTE (from HWWIFI2_WIFI.ko disassembly of wal_hipriv_set_txpower):
+ *   +1c8: 0xe3530f4b    cmp r3, #300      ; Maximum power parameter is 300 (0.1 dBm units)
+ *   +1cc: 0x9a000017    bls valid_range   ; Values > 300 are rejected as invalid argument!
+ * Units: 0.1 dBm (200 = 20.0 dBm / 100 mW; 300 = 30.0 dBm / 1000 mW).
  */
 extern int wal_hipriv_set_txpower(struct net_device *net_dev, const char *param) __attribute__((weak));
 extern struct net_device *dev_get_by_name(struct net *net, const char *name) __attribute__((weak));
@@ -93,38 +98,51 @@ static int trigger_wifi_1000mw(void) {
     
     g_wifi_overdrive_active = 1;
 
-    if (dev_get_by_name) {
-        dev_2g = dev_get_by_name(&init_net, "ath0");
-        dev_5g = dev_get_by_name(&init_net, "ath8");
+    if (!wal_hipriv_set_txpower) {
+        printk("[RING0_GATE] Error: wal_hipriv_set_txpower symbol unresolved (HWWIFI2_WIFI not loaded?)\n");
+        g_ath0_ret = -38; /* -ENOSYS */
+        g_ath8_ret = -38; /* -ENOSYS */
+        return -38;
     }
 
-    if (wal_hipriv_set_txpower) {
+    if (!dev_get_by_name) {
+        printk("[RING0_GATE] Error: dev_get_by_name symbol unresolved\n");
+        g_ath0_ret = -38;
+        g_ath8_ret = -38;
+        return -38;
+    }
+
+    dev_2g = dev_get_by_name(&init_net, "ath0");
+    dev_5g = dev_get_by_name(&init_net, "ath8");
+
+    /*
+     * SAFETY CRITICAL: Prevent NULL pointer dereference in wal_hipriv_set_txpower.
+     * The HiSilicon driver immediately dereferences net_dev->priv. If net_dev is NULL,
+     * passing it causes an immediate Kernel Panic (Data Abort).
+     * We strictly validate dev != NULL before calling.
+     */
+    if (dev_2g) {
         /*
-         * Parameter format for wal_hipriv_set_txpower:
-         * "30" specifies 30 dBm (1000 mW equivalent target power)
+         * Parameter "300" = 30.0 dBm (1000 mW).
+         * HiSilicon internal atoi validation enforces <= 300.
          */
-        if (dev_2g) {
-            g_ath0_ret = wal_hipriv_set_txpower(dev_2g, "30");
-        } else {
-            g_ath0_ret = wal_hipriv_set_txpower((void *)0, "ath0 30");
-        }
-
-        if (dev_5g) {
-            g_ath8_ret = wal_hipriv_set_txpower(dev_5g, "30");
-        } else {
-            g_ath8_ret = wal_hipriv_set_txpower((void *)0, "ath8 30");
-        }
-        
-        printk("[RING0_GATE] 1000mW (30dBm) hardware overdrive dispatched: ath0 rc=%d, ath8 rc=%d\n", 
-               g_ath0_ret, g_ath8_ret);
+        g_ath0_ret = wal_hipriv_set_txpower(dev_2g, "300");
+        if (dev_put) dev_put(dev_2g);
     } else {
-        printk("[RING0_GATE] Warning: wal_hipriv_set_txpower not resolved, driver hook pending.\n");
+        printk("[RING0_GATE] Interface ath0 (2.4G) not found or down, skipping to prevent Panic.\n");
+        g_ath0_ret = -19; /* -ENODEV */
     }
 
-    if (dev_put) {
-        if (dev_2g) dev_put(dev_2g);
-        if (dev_5g) dev_put(dev_5g);
+    if (dev_5g) {
+        g_ath8_ret = wal_hipriv_set_txpower(dev_5g, "300");
+        if (dev_put) dev_put(dev_5g);
+    } else {
+        printk("[RING0_GATE] Interface ath8 (5G) not found or down, skipping to prevent Panic.\n");
+        g_ath8_ret = -19; /* -ENODEV */
     }
+
+    printk("[RING0_GATE] 1000mW (30.0 dBm / '300') overdrive dispatched: ath0 rc=%d, ath8 rc=%d\n",
+           g_ath0_ret, g_ath8_ret);
 
     return 0;
 }
@@ -135,7 +153,8 @@ static int ring0_show(struct seq_file *m, void *v) {
     seq_printf(m, "KERNEL_VER=5.10.0-SMP-ARMv7\n");
     seq_printf(m, "CHIPSET=HiSilicon_Hi1152_Wi-Fi_6\n");
     seq_printf(m, "ESCALATION_COUNT=%lu\n", g_escalation_count);
-    seq_printf(m, "WIFI_1000MW_OVERDRIVE=%s\n", g_wifi_overdrive_active ? "ACTIVE_30DBM" : "STANDBY");
+    seq_printf(m, "WIFI_1000MW_OVERDRIVE=%s\n", g_wifi_overdrive_active ? "DISPATCHED" : "STANDBY");
+    seq_printf(m, "TARGET_POWER_PARAM=300 (30.0 dBm / 1000 mW)\n");
     seq_printf(m, "ATH0_2.4G_RC=%d\n", g_ath0_ret);
     seq_printf(m, "ATH8_5.0G_RC=%d\n", g_ath8_ret);
     seq_printf(m, "COMMANDS=root, wifi_pwr 1000\n");
@@ -174,7 +193,7 @@ static ssize_t ring0_write(struct file *file, const char *buf, size_t count, lof
             return -12; /* -ENOMEM */
         }
     }
-    /* Command 2: "wifi_pwr 1000" or "overdrive" -> 1000mW 30dBm RF overdrive */
+    /* Command 2: "wifi_pwr 1000" or "overdrive" -> 1000mW 30.0dBm RF overdrive */
     else if ((kbuf[0] == 'w' && kbuf[1] == 'i' && kbuf[2] == 'f' && kbuf[3] == 'i' && kbuf[4] == '_' &&
               kbuf[5] == 'p' && kbuf[6] == 'w' && kbuf[7] == 'r' && kbuf[8] == ' ' && 
               kbuf[9] == '1' && kbuf[10] == '0' && kbuf[11] == '0' && kbuf[12] == '0') ||
