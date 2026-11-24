@@ -129,8 +129,17 @@ static int trigger_wifi_peak_power(int tenths_dbm) {
         pwr_str[3] = '\0';
     }
 
-    dev_2g = dev_get_by_name(&init_net, "ath0");
-    dev_5g = dev_get_by_name(&init_net, "ath8");
+    /*
+     * HiSilicon Wi-Fi 6 Architecture:
+     * On Hi1152 / SD5182H Dopra Linux, Virtual APs are named vap0 (2.4G) and vap8 (5G).
+     * We attempt vap0/vap8 first, falling back to ath0/ath8 or Hisilicon0.
+     */
+    dev_2g = dev_get_by_name(&init_net, "vap0");
+    if (!dev_2g) dev_2g = dev_get_by_name(&init_net, "ath0");
+    if (!dev_2g) dev_2g = dev_get_by_name(&init_net, "Hisilicon0");
+
+    dev_5g = dev_get_by_name(&init_net, "vap8");
+    if (!dev_5g) dev_5g = dev_get_by_name(&init_net, "ath8");
 
     /*
      * SAFETY CRITICAL: Prevent NULL pointer dereference in wal_hipriv_set_txpower.
@@ -142,7 +151,7 @@ static int trigger_wifi_peak_power(int tenths_dbm) {
         g_ath0_ret = wal_hipriv_set_txpower(dev_2g, pwr_str);
         if (dev_put) dev_put(dev_2g);
     } else {
-        printk("[RING0_GATE] Interface ath0 (2.4G) not found or down, skipping to prevent Panic.\n");
+        printk("[RING0_GATE] Interface vap0/ath0 (2.4G) not found or down, skipping to prevent Panic.\n");
         g_ath0_ret = -19; /* -ENODEV */
     }
 
@@ -150,11 +159,11 @@ static int trigger_wifi_peak_power(int tenths_dbm) {
         g_ath8_ret = wal_hipriv_set_txpower(dev_5g, pwr_str);
         if (dev_put) dev_put(dev_5g);
     } else {
-        printk("[RING0_GATE] Interface ath8 (5G) not found or down, skipping to prevent Panic.\n");
+        printk("[RING0_GATE] Interface vap8/ath8 (5G) not found or down, skipping to prevent Panic.\n");
         g_ath8_ret = -19; /* -ENODEV */
     }
 
-    printk("[RING0_GATE] Peak hardware overdrive (%d.%d dBm / '%s') dispatched: ath0 rc=%d, ath8 rc=%d\n",
+    printk("[RING0_GATE] Peak hardware overdrive (%d.%d dBm / '%s') dispatched: 2.4G(vap0) rc=%d, 5G(vap8) rc=%d\n",
            tenths_dbm / 10, tenths_dbm % 10, pwr_str, g_ath0_ret, g_ath8_ret);
 
     return 0;
@@ -169,8 +178,8 @@ static int ring0_show(struct seq_file *m, void *v) {
     seq_printf(m, "ESCALATION_COUNT=%lu\n", g_escalation_count);
     seq_printf(m, "WIFI_PEAK_OVERDRIVE=%s\n", g_wifi_overdrive_active ? "DISPATCHED" : "STANDBY");
     seq_printf(m, "TARGET_POWER_PARAM=%d (%d.%d dBm)\n", g_target_dbm_tenths, g_target_dbm_tenths / 10, g_target_dbm_tenths % 10);
-    seq_printf(m, "ATH0_2.4G_RC=%d\n", g_ath0_ret);
-    seq_printf(m, "ATH8_5.0G_RC=%d\n", g_ath8_ret);
+    seq_printf(m, "VAP0_2.4G_RC=%d\n", g_ath0_ret);
+    seq_printf(m, "VAP8_5.0G_RC=%d\n", g_ath8_ret);
     seq_printf(m, "COMMANDS=root, wifi_pwr 25 (or 250), wifi_pwr 1000\n");
     seq_printf(m, "===================================\n");
     return 0;
