@@ -1347,32 +1347,73 @@ LAN1.X_HW_L3Enable=1&LAN2.X_HW_L3Enable=1&LAN3.X_HW_L3Enable=1&LAN4.X_HW_L3Enabl
 * **终极解脱方案（零依赖工装模式）**：
   1. **物理歼灭工装触发标记**：
      - 彻底删除 `/mnt/jffs2/Equip.sh` 与 `/mnt/jffs2/ProductLineMode`；
-  2. **开机自愈启动链（`/etc/rc.local`）重构**：
-     - 重写 `/etc/rc.local`（落地于 NAND Flash UBIFS `/mnt/jffs2/plug/apps/apps/etc/rc.local`）：
+  2. **开机自愈启动链（`/etc/rc.local`）防变砖重构（异步就绪门控 + 死循环熔断）**：
+     - 同步原地写入 `/mnt/jffs2/plug/apps/apps/etc/rc.local`（UBIFS upperdir），并通过 `echo 2 > /proc/sys/vm/drop_caches` 对齐 OverlayFS 目录缓存：
      ```sh
      #!/bin/sh
-     # Permanent Root Shell & Zero Equip Trap
+     # Telecom OSGi container autostart - Permanent Root Shell & Zero-Brick Guard
 
-     # 1. 独立拉起纯净 Root ash Shell（端口 2333 与 2323）
+     # 1. Start standalone Root ash shells immediately (never blocked by kernel module)
      /usr/sbin/telnetd -p 2333 -l /bin/sh &
      /usr/sbin/telnetd -p 2323 -l /bin/sh &
 
-     # 2. 保持 TelnetEnable，主动清除任何遗留的 EquipMode 标记（双重防呆）
+     # 2. Keep TelnetEnable and strictly eradicate any Equip/Factory test mode locks
      touch /mnt/jffs2/TelnetEnable
      rm -f /mnt/jffs2/Equip.sh /mnt/jffs2/ProductLineMode 2>/dev/null
 
-     # 3. 硬件驱动自动注入与 25.0 dBm 射频满血自愈
-     if [ -f /mnt/jffs2/ring0_gate.ko ]; then
-         insmod /mnt/jffs2/ring0_gate.ko 2>/dev/null
-         echo -n "wifi_pwr 25" > /proc/ring0_gate 2>/dev/null
-     fi
+     # 3. Deferred, Readiness-Gated, Anti-Bootloop Ring0 Loader (Background)
+     (
+         GUARD="/mnt/jffs2/.ring0_boot_guard"
+
+         # Anti-bootloop circuit breaker: if previous boot crashed during Ring0 init, abort safely
+         if [ -f "$GUARD" ]; then
+             rm -f "$GUARD"
+             touch /mnt/jffs2/.ring0_boot_skipped
+             sync
+             exit 0
+         fi
+
+         # Initial delay guarantees telnetd (2323) is reachable even in worst-case failure
+         sleep 15
+
+         # Wait up to 60s for host init, HWWIFI2_WIFI, and BOTH vap0 & vap8 UP
+         # Prevents falling back to down master netdev Hisilicon0
+         i=0
+         ready=0
+         while [ "$i" -lt 12 ]; do
+             if [ -f /e8cvar/init_complete ] && \
+                grep -q '^HWWIFI2_WIFI ' /proc/modules 2>/dev/null && \
+                [ "$(cat /sys/class/net/vap0/operstate 2>/dev/null)" = "up" ] && \
+                [ "$(cat /sys/class/net/vap8/operstate 2>/dev/null)" = "up" ]; then
+                 ready=1
+                 break
+             fi
+             sleep 5
+             i=$((i + 1))
+         done
+
+         if [ "$ready" -eq 1 ] && [ -f /mnt/jffs2/ring0_gate.ko ]; then
+             touch "$GUARD"
+             sync
+             grep -q '^ring0_gate ' /proc/modules 2>/dev/null || insmod /mnt/jffs2/ring0_gate.ko 2>/dev/null
+             if [ -e /proc/ring0_gate ]; then
+                 echo -n "wifi_pwr 25" > /proc/ring0_gate 2>/dev/null
+             fi
+             sleep 5
+             rm -f "$GUARD"
+             sync
+         fi
+     ) &
 
      exit 0
      ```
+     - **两条核心防变砖工程经验（实证踩坑避险）**：
+       1. **严禁开机同步盲触发 `wal_hipriv_set_txpower`（防 `panic=1` 无限重启环）**：内核启动参数固定为 `panic=1` 且 `/proc/sys/kernel/panic` 为 `3`，主网卡 `Hisilicon0` 在 `/sys/class/net/` 中常驻且 `operstate=down`。若在宿主 `init_complete` 与 `vap0`/`vap8` 全部 `up` 之前同步下发 `wifi_pwr 25`，会误触发 `Hisilicon0` 回退分支导致极早期驱动异常甚至陷入 3 秒死循环重启。因此必须先独立拉起 `telnetd`，再在后台子进程等待 `vap0`/`vap8` 双双就绪，并配合 `.ring0_boot_guard` 硬件熔断器（若在注入后 5 秒内发生异常重启，下次开机自动跳过 `insmod` 保底）。
+       2. **严禁对已挂载的 OverlayFS `upperdir` 使用 `cp` 跨层覆盖**：直接 `cp` 覆写 `/mnt/jffs2/plug/apps/apps/etc/rc.local` 会导致合并视图 `/etc/rc.local` 指向 `nlink=0` 的孤立旧 inode，后续在融合层修改极易写进“幽灵文件”。正确做法是直接原地重定向写实物理层文件并执行 `sync && echo 2 > /proc/sys/vm/drop_caches` 刷新 dentry 缓存（经 `ls -li` 与 `md5sum` 验证两者共享同一 inode）。
   3. **冷重启确定性收敛**：
      - 系统冷启动时 100% 进入正式商用模式（Commercial Mode），原生加载 `/mnt/jffs2/hw_ctree.xml` 用户真实配置：PPPoE 广域网开机秒拨通、原厂 Wi-Fi 正常加密广播、LAN DHCP 毫秒级分发 IP；
-     - 端口 2323 与 2333 独立 Root Shell 随 `S95done` 顺次拉起，`ring0_gate` 满血 25.0 dBm 功率秒级自动挂载；
-     - 运营商全部后门保持灭活（`exit 0` 桩与 `chmod 000`），空闲内存恒定维持在 169 MB 纯净峰值，彻底实现“无论断电插拔多少次，开机即满血上网”！
+     - 端口 2323 与 2333 独立 Root Shell 随 `S95done` 优先无阻塞拉起，后台就绪门控确认 `vap0`/`vap8` 均 `up` 后自动注入 `ring0_gate.ko` 并锁定 25.0 dBm（`FEM Psat` 甜点功率）；
+     - 运营商全部后门保持灭活（`exit 0` 桩与 `chmod 000`），空闲内存恒定维持在 ~168 MB 纯净峰值，彻底实现“无论断电插拔多少次，开机即满血上网、绝不变砖”！
 
 ---
 
