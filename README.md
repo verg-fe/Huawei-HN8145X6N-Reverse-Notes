@@ -1337,6 +1337,43 @@ LAN1.X_HW_L3Enable=1&LAN2.X_HW_L3Enable=1&LAN3.X_HW_L3Enable=1&LAN4.X_HW_L3Enabl
 | **网络延迟与丢包** | 运营商定时抓包扰动 | 13.0 ms | **13.8 ms（3 次 Ping 0% 丢包）** | PPPoE 与 Wi-Fi 满血直通 |
 | **运营商遥测通道** | 每 5~30 分钟上报 MQTT/DPI | DPI 摘除，残留云控 | **完全黑洞化（127.0.0.1）** | 零外泄、零后门 |
 
+#### (4) 彻底根除断电冷重启断网与产线工装陷阱（Zero-Break Cold Boot Hardening）
+* **断电重启断网的深层病灶反思**：
+  - 在早期嵌入式维护方案中，常有在开机脚本中写入 `/mnt/jffs2/Equip.sh`（`EquipId=1`）以期维系 Shell 的粗暴做法。
+  - **致命副作用**：华为 Dopra 底层（`libamp_init.so` / `HW_DIA_CheckIsNewEquipMode`）在冷启动时一旦扫描到 `Equip.sh`，会判定设备正处于产线组装工装模式：
+    1. 冻结家庭 PPPoE 广域网自动拨号；
+    2. 屏蔽用户侧正常 Wi-Fi 配置，强行广播免密的产线测试 SSID（如 `WirelessNet` / `wifi equip_new`）；
+    3. 冻结 LAN 口 DHCP Server 分发服务（导致终端连上 Wi-Fi 永远卡在“正在获取 IP 地址”，电脑以太网报 169.254.x.x “无法访问 Internet”）。
+* **终极解脱方案（零依赖工装模式）**：
+  1. **物理歼灭工装触发标记**：
+     - 彻底删除 `/mnt/jffs2/Equip.sh` 与 `/mnt/jffs2/ProductLineMode`；
+  2. **开机自愈启动链（`/etc/rc.local`）重构**：
+     - 重写 `/etc/rc.local`（落地于 NAND Flash UBIFS `/mnt/jffs2/plug/apps/apps/etc/rc.local`）：
+     ```sh
+     #!/bin/sh
+     # Permanent Root Shell & Zero Equip Trap
+
+     # 1. 独立拉起纯净 Root ash Shell（端口 2333 与 2323）
+     /usr/sbin/telnetd -p 2333 -l /bin/sh &
+     /usr/sbin/telnetd -p 2323 -l /bin/sh &
+
+     # 2. 保持 TelnetEnable，主动清除任何遗留的 EquipMode 标记（双重防呆）
+     touch /mnt/jffs2/TelnetEnable
+     rm -f /mnt/jffs2/Equip.sh /mnt/jffs2/ProductLineMode 2>/dev/null
+
+     # 3. 硬件驱动自动注入与 25.0 dBm 射频满血自愈
+     if [ -f /mnt/jffs2/ring0_gate.ko ]; then
+         insmod /mnt/jffs2/ring0_gate.ko 2>/dev/null
+         echo -n "wifi_pwr 25" > /proc/ring0_gate 2>/dev/null
+     fi
+
+     exit 0
+     ```
+  3. **冷重启确定性收敛**：
+     - 系统冷启动时 100% 进入正式商用模式（Commercial Mode），原生加载 `/mnt/jffs2/hw_ctree.xml` 用户真实配置：PPPoE 广域网开机秒拨通、原厂 Wi-Fi 正常加密广播、LAN DHCP 毫秒级分发 IP；
+     - 端口 2323 与 2333 独立 Root Shell 随 `S95done` 顺次拉起，`ring0_gate` 满血 25.0 dBm 功率秒级自动挂载；
+     - 运营商全部后门保持灭活（`exit 0` 桩与 `chmod 000`），空闲内存恒定维持在 169 MB 纯净峰值，彻底实现“无论断电插拔多少次，开机即满血上网”！
+
 ---
 
 ## 0x0B 总结与方法论反思
