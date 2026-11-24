@@ -1303,16 +1303,39 @@ LAN1.X_HW_L3Enable=1&LAN2.X_HW_L3Enable=1&LAN3.X_HW_L3Enable=1&LAN4.X_HW_L3Enabl
   mv /mnt/jffs2/plug/apps/apps/opt/preinstall/b01odmv3/files/m01-b01.ko /mnt/jffs2/plug/apps/apps/opt/preinstall/b01odmv3/files/m01-b01.ko.disabled
   ```
 
-#### (2) 天翼云控与小翼管家探针全家桶斩断
-* **涉及进程**：`/sbin/cloudclient`、`/sbin/cloudclocal`、`/files/opmaintainv3`、`/files/xrobotv3`；
-* **处置操作**：
-  1. 拔除自启链：删除 `/mnt/jffs2/plug/apps/apps/etc/rc.d/S16cloudclt` 与 `S20vpnclient`；
-  2. 权限冻结：对上述所有监控二进制赋予 `chmod 000`；
-  3. 域名黑洞化：在 `/etc/hosts` 中将 `devacs.edatahome.com`、`b01-data-reported.189cube.com`、`189cube.com` 全部重定向至 `127.0.0.1`。
+#### (2) 天翼云控、LXC 套娃沙箱与小翼管家探针全家桶终极清剿
+* **深层暗桩与内存暴食元凶**：
+  - **LXC 嵌套沙箱与 `appmgr` 监军**：系统运行环境实际被封装在 saf LXC 容器内（`/proc/1/environ` 显示 `container=lxc`）。`appmgr` 启动后通过 `/sbin/init.lxc` 在后台并发拉起 6 个全功能 LXC 容器（`extccv3` 外部云控、`gamespeederv3` 提速插件、`inter_conndv3` 互通代理、`redictv3` 指令重定向、`u01v3` 业务探针、`xrobotv3` 分析机器人），并在内核架设 `lxcbr0` 网桥与多组 `veth` 端口，单是网卡频繁拉起与异常崩溃（每 30 秒 churn 一次）就吃掉了近 30 MB 内核 Slab 缓存；
+  - **`procd` 自启死斗循环**：`/etc/init.d/appmgr`、`cloudclt`、`dsmonitor`、`vpnclient` 均配置了 `procd_set_param respawn 3600 5 0`。常规 `killall -9` 杀掉后 5 秒内被 `procd` 秒速拉起；
+  - **tmpfs 内存盘黑洞（SDT）**：挂载于 `/e8cvar/bak/sdt`（tmpfs 内存盘），持续抓包并打包堆积了 12.1 MB 的 `wifi.log*.tar.gz` 压缩遥测，死死霸占物理内存；
+  - **底层固化机制**：容器的根文件系统挂载为 overlayfs，其可写层（upperdir）真实落盘于 NAND Flash 的 UBIFS 分区 `/mnt/jffs2/plug/apps/apps/`，任何在容器内的修改均会持久化保存。
+* **处置实录（物理级断草除根）**：
+  1. **服务终结与自启链物理拔除**：
+     - 调用 `/etc/init.d/{appmgr,dsmonitor,cloudclt,vpnclient} stop` 停止服务；
+     - 彻底删除自启动软链接 `/etc/rc.d/S15appmgr`、`S16cloudclt`、`S50dsmonitor`、`S20vpnclient`；
+  2. **Init 脚本置换为 Exit 0 桩**：
+     - 将 `/etc/init.d/appmgr`、`dsmonitor`、`cloudclt`、`vpnclient` 内容重写为纯净的 `#!/bin/sh\nexit 0`，使 `procd` 即使尝试触发也瞬间优雅退出，彻底破坏重启循环；
+  3. **二进制可执行权冻结（Neutering）**：
+     - 执行 `chmod 000 /sbin/appmgr /sbin/init.lxc /usr/sbin/dsmonitor /usr/sbin/vpnclient /usr/sbin/vpndns /sbin/cloudclient /sbin/cloudclocal`，彻底剥夺运行权限；
+     - 将 `/opt/apps/` 下各容器工作目录重命名为 `*.disabled`；
+  4. **击沉虚拟网桥与释放 tmpfs**：
+     - 执行 `rm -rf /e8cvar/bak/sdt/*` 清空 12.1 MB 遥测垃圾；
+     - 执行 `ifconfig lxcbr0 down` 击沉网桥，释放内核绑定的多组 `veth` 端口；
+  5. **域名黑洞化与闪存落盘**：
+     - 在 `/etc/hosts` 中将 `devacs.edatahome.com`、`acs.edatahome.com`、`b01-data-reported.189cube.com`、`b01.189cube.com`、`189cube.com` 全部重定向至 `127.0.0.1`；
+     - 执行 `sync`，全部改动稳稳写入 NAND Flash UBIFS 分区，冷重启后依然无懈可击。
 
-#### (3) 效果验证
-* 彻底清理后，光猫系统空闲可用物理内存从原先的 ~60 MB 暴增至 **103 MB**（释放超 40MB 内存占用）；
-* 运营商对光猫的远程推送、静默改密、HTTP 劫持与原始数据包上报通道被全链条物理切断，宽带与 Wi-Fi 传输延迟稳定在 13 ms，零丢包。
+#### (3) 效果验证与真实系统指标对比
+实测光猫各项真实指标：
+
+| 监控项目 | 初始状态（带后门与套娃容器） | 清理 `m01_b01` 后 | 终极清剿全部 LXC 容器与 SDT 后 | 状态评价 |
+| :--- | :--- | :--- | :--- | :--- |
+| **空闲物理内存 (Free RAM)** | 65 MB | 103 MB | **169.1 MB** | **净赚 104+ MB 物理 RAM！** |
+| **可用物理内存 (Available RAM)** | ~90 MB | ~140 MB | **214.8 MB** | **可用率达 58.1%** |
+| **内核 Slab 缓存开销** | ~85 MB | ~85 MB | **58.4 MB** | **释放 27 MB 垃圾 Slab 缓存** |
+| **运行进程总数** | 35+ 个（含 6 大 LXC 容器） | 28 个 | **仅 12 个核心路由守护进程** | 纯净极简，零异动 |
+| **网络延迟与丢包** | 运营商定时抓包扰动 | 13.0 ms | **13.8 ms（3 次 Ping 0% 丢包）** | PPPoE 与 Wi-Fi 满血直通 |
+| **运营商遥测通道** | 每 5~30 分钟上报 MQTT/DPI | DPI 摘除，残留云控 | **完全黑洞化（127.0.0.1）** | 零外泄、零后门 |
 
 ---
 
