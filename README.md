@@ -902,10 +902,10 @@ uid=0(root) gid=0(root)
 WAP(Dopra Linux) # cat /proc/wap_proc/pd_dynamic_attr
 AttrID      ObjID       AttrValue
 0x11000033  0x00000001  "12"                     # 上行模式: 10G-EPON 完好
-0x11000035  0x00000002  "48575443F8A128B2"       # PON SN: 局端绑定 SN 完好
-0x1100003b  0x00000008  "2150087601HYR2009053"   # 设备序列号: 完好
-0x1100003d  0x0000000a  "00:E0:FC:39:74:35"       # LAN MAC: 完好
-0x10000055  0x00000025  "F8:F7:B9:37:16:B2"       # WAN MAC: 完好
+0x11000035  0x00000002  "48575443F8A1XXXX"       # PON SN: 局端绑定 SN 完好
+0x1100003b  0x00000008  "2150087601HYRXXXXXX"   # 设备序列号: 完好
+0x1100003d  0x0000000a  "00:E0:FC:XX:XX:35"       # LAN MAC: 完好
+0x10000055  0x00000025  "F8:F7:B9:XX:XX:B2"       # WAN MAC: 完好
 WAP(Dopra Linux) # cat /mnt/jffs2/xpon_mode
 6                                                 # 物理层 10G-EPON 模式文件完好
 ```
@@ -1010,11 +1010,11 @@ sequenceDiagram
     Note over Web,Ppp: 现场真实三大卡死点与闭环解法
     Note over Ont,Dbus: 卡死点 1: ONT 未认证 (LOID 为空, PON_STATUS_NO_REG_NO_AUTH)
     Web->>Ont: 访问 /html/amp/ontauth/password.asp
-    Web->>Ont: 填入生产 LOID: PZ8466857342 提交 set.cgi
+    Web->>Ont: 填入生产 LOID: PZ8466****** 提交 set.cgi
     Ont->>Dbus: 广播 LOID 变更 -> OLT 鉴权准入就绪
     
     Note over Wan,Ppp: 卡死点 2: Web 添加 WAN 被动态运维口令 (CheckPassword) 强行拦截
-    Web->>Wan: 访问 wan.asp (表单填入 VLAN 1162 / PPPoE PZHAA2230109)
+    Web->>Wan: 访问 wan.asp (表单填入 VLAN 1162 / PPPoE PZHAA22*****)
     Web->>Wan: 绕过 CheckPassword(), 直接调用 OnAddApply()
     Wan->>Ppp: 成功派生 wan1 与 pppd (PID 6243, unit 257)
 
@@ -1025,7 +1025,7 @@ sequenceDiagram
 
 #### 真机状态采样数据分析：
 1. **网络接口与拨号进程状态 (`ifconfig`, `ps | grep ppp`)**：
-   - 虚拟广域网接口 `wan1` 成功上线（HWaddr `F8:F7:B9:37:16:B3`），处于 `UP BROADCAST RUNNING MULTICAST MTU:1500`；
+   - 虚拟广域网接口 `wan1` 成功上线（HWaddr `F8:F7:B9:XX:XX:B3`），处于 `UP BROADCAST RUNNING MULTICAST MTU:1500`；
    - 广域网拨号守护进程正常派生：
      ```text
      6243 wsv_bbsp 1588 S pppd nic-wan1 unit 257 maxfail 0 persist +ipv6 debug
@@ -1036,14 +1036,14 @@ sequenceDiagram
      ```text
      CtSgwDBusGetAllProperty: return (0), get value [{'LOID': <''>, 'PONStatus': <'PON_STATUS_NO_REG_NO_AUTH'>}]
      ```
-   - 我们在 Chrome 管理后台成功定位系统工具隐藏入口 `/html/amp/ontauth/password.asp`，将脱库底牌 **`LOID: PZ8466857342`**（密码留空）提交写入底层 `InternetGatewayDevice.DeviceInfo`；
+   - 我们在 Chrome 管理后台成功定位系统工具隐藏入口 `/html/amp/ontauth/password.asp`，将脱库底牌 **`LOID: PZ8466******`**（密码留空）提交写入底层 `InternetGatewayDevice.DeviceInfo`；
    - 提交后 D-Bus `/com/ctc/igd1/Info/PON` 即刻捕获并同步了有效凭据：
      ```text
-     CtSgwDBusGetAllProperty: return (0), get value [{'LOID': <'PZ8466857342'>, 'SupportPONStatusQuery': <true>}]
+     CtSgwDBusGetAllProperty: return (0), get value [{'LOID': <'PZ8466******'>, 'SupportPONStatusQuery': <true>}]
      ```
 3. **Web 前端动态运维口令绕过（WAN 创建闭环）**：
    - 在 `wan.asp` 中点击保存时，前端默认触发 `CheckPassword()` 拦截弹窗，强制索取电信运维人员的一次性动态维护码（`../common/checkmodepwd.asp`）；
-   - 通过在 Chrome DevTools/eval 上下文直接执行 `document.getElementById('menuIframe').contentWindow.OnAddApply()`，直接绕过密码核验，携带合法 Anti-CSRF Token `x.X_HW_Token` 提交 `addcfg.cgi`，成功在闪存与内存中实例化 `1_INTERNET_R_VID_1162`（VLAN `1162`，Priority `0`，PPPoE 账号 `PZHAA2230109`，绑定 LAN1-LAN4 与 SSID1）；
+   - 通过在 Chrome DevTools/eval 上下文直接执行 `document.getElementById('menuIframe').contentWindow.OnAddApply()`，直接绕过密码核验，携带合法 Anti-CSRF Token `x.X_HW_Token` 提交 `addcfg.cgi`，成功在闪存与内存中实例化 `1_INTERNET_R_VID_1162`（VLAN `1162`，Priority `0`，PPPoE 账号 `PZHAA22*****`，绑定 LAN1-LAN4 与 SSID1）；
 4. **装备模式彻底脱离与硬件转发解封**：
    - 在真实宿主 Root 终端执行 `/usr/bin/EquipMode.sh off`，触发底层寄存器调用 `sndhlp 0 0x20004065 0x65 4 0`，物理抹除 `/mnt/jffs2/Equip.sh` 与 `/mnt/jffs2/equip_ip_enable`；
    - 现场核验证实 `/proc/wap_proc/basic_equip` 从 `1` 彻底恢复为 **`0`**，NP 硬件转发流水线全面解封！
@@ -1058,12 +1058,161 @@ sequenceDiagram
   RxPower         : -100.0 (dBm / 无光)
   TxPower         : 0.00 (dBm)
   ```
-- **终极定界**：当前光猫内部的**所有软件与配置底牌（LOID `PZ8466857342`、PON SN `48575443F8A128B2`、WAN 实例 `1_INTERNET_R_VID_1162`、PPPoE 账号 `PZHAA2230109`、Option82 绑定参数、装备模式清零 `basic_equip: 0`）已经 100% 修复归位且常驻闪存**！
-- 当前网络未通的**唯一物理阻断点**为：**SC-APC 绿色光纤头当前处于拔出断光状态**（`ftm rx los stat: los`）。只要将绿色光纤接头插紧入光猫 PON 口，光功率恢复至 `-20 dBm` 正常区间，海思突发时钟（BCDR）将瞬时定标，OLT 将依据注入的 LOID `PZ8466857342` 秒级放行认证，`pppd` 将瞬间完成 PPPoE 协商并获取公网 IP！
+- **终极定界**：当前光猫内部的**所有软件与配置底牌（LOID `PZ8466******`、PON SN `48575443F8A1XXXX`、WAN 实例 `1_INTERNET_R_VID_1162`、PPPoE 账号 `PZHAA22*****`、Option82 绑定参数、装备模式清零 `basic_equip: 0`）已经 100% 修复归位且常驻闪存**！
+- 当前网络未通的**唯一物理阻断点**为：**SC-APC 绿色光纤头当前处于拔出断光状态**（`ftm rx los stat: los`）。只要将绿色光纤接头插紧入光猫 PON 口，光功率恢复至 `-20 dBm` 正常区间，海思突发时钟（BCDR）将瞬时定标，OLT 将依据注入的 LOID `PZ8466******` 秒级放行认证，`pppd` 将瞬间完成 PPPoE 协商并获取公网 IP！
 
 ---
 
-## 0x0A 总结与方法论反思
+## 0x0A 物理链路回连、全栈网络打通与业务层全面复活（真机闭环实录）
+
+在上述全部底层结构与鉴权凭据归位后，设备进入了最终的现场实证检验阶段。随着光纤插紧与物理接入，我们记录并攻破了在网复活过程中的最后两道经典“暗坑”：**硬件交换芯片二三层隔离死穴**与**出厂 Wi-Fi 凭据热重载**，并彻底定界了终端客户端的复合环境干扰。
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Fiber as SC-APC 物理光纤
+    participant BCDR as 海思突发时钟 / EPON MAC
+    participant Olt as 电信 OLT 机房 (O5 状态)
+    participant PPP as pppd 拨号守护 (ppp257)
+    participant Switch as 海思硬件交换芯片 / L3 NAT
+    participant PC as 客户端主机 (以太网 / 网络 31)
+    participant Wifi as 11ax 无线射频 (vap0/vap8)
+
+    Fiber->>BCDR: 光纤插紧接入 (Rx: -20.04 dBm, Tx: 3.63 dBm)
+    BCDR->>Olt: 突发锁相成功 -> 上报 LOID: PZ8466******
+    Olt-->>BCDR: O5 状态放行准入 (EPON 链路就绪)
+    BCDR->>PPP: Netlink 触发 WAN 拨号协商
+    PPP->>Olt: PPPoE PAP 握手 (PZHAA22*****)
+    Olt-->>PPP: 分配公网 IP 100.68.X.X / IPv6 240e:398:...
+    
+    Note over Switch,PC: 暗坑 1: 出厂 ctree 导致 LAN 口被硬锁在 L2 纯桥接，NAT 不转发
+    PC->>Switch: 发送外网探测报文 (NCSI / DNS)
+    Switch--xPC: 交换芯片二层桥接拦截，内核 PREROUTING 链绕过 (超时)
+    Note over Switch: 执行 set.cgi 注入: LAN1~LAN4.X_HW_L3Enable = 1
+    Switch->>PC: 全锥形 NAT 硬件路由贯通 (HTTP 200 "Microsoft Connect Test")
+
+    Note over Wifi: 暗坑 2: 出厂默认 SSID "WirelessNet"，密码未知
+    Note over Wifi: 执行 SU_WAP set wlan basic 注入原厂 SSID & 密码 6u4c****
+    Wifi->>Wifi: 广播 ChinaNet-SaUk & ChinaNet-SaUk-5G (160MHz 2402M)
+    Note over Wifi: ring0_gate.ko 内核射频超频 200% (30dBm / 1000mW) 满血输出！
+```
+
+### 1. 物理光纤接入与 O5 状态秒级鉴权
+当用户将 SC-APC 绿色单模光纤头插紧入光猫 PON 口后，底层硬件探针 `/proc/ring0_gate` 采集到了真实光链路遥测数据：
+- **光接收功率 (RxPower)**：`-20.04 dBm`（处于标准工程金线 `-15 ~ -25 dBm` 最佳区间）；
+- **光发送功率 (TxPower)**：`+3.63 dBm`；
+- **激光器偏置电流 (Bias)**：`18 mA`，供电电压 `3262 mV`，模块温度 `62 ℃`；
+- **状态机迁移**：海思突发时钟恢复（BCDR Lock），物理层脱离 `los/lof`，电信机房 OLT 依据我们注入的 LOID `PZ8466******` 瞬间放行准入，设备跃升为 **`O5 (Operation)`** 状态！
+
+### 2. PPPoE 协议栈握手与双栈公网贯通
+伴随硬件链路拉起，后台守护进程 `pppd nic-wan1 unit 257` 立即完成 PAP 认证与 IPCP/IPV6CP 动态协商，虚拟网卡 `ppp257` 成功绑定：
+```text
+ppp257    Link encap:Point-to-Point Protocol  
+          inet addr:100.68.X.X  P-t-P:100.68.X.1  Mask:255.255.255.255
+          inet6 addr: 240e:398:XXXX:XXXX::XXXX/128 Scope:Global
+          inet6 addr: fe80::faf7:b908:5137:16b3/128 Scope:Link
+          UP POINTOPOINT RUNNING NOARP MULTICAST  MTU:1492  Metric:1
+          RX bytes:100268 (97.9 KiB)  TX bytes:372747 (364.0 KiB)
+```
+- **路由通达性验证**：从光猫底层直接向电信机房网关发起跟踪：
+  - `ping 100.68.X.1`：时延稳定在 `2.02 ms`，0% 丢包；
+  - `traceroute 114.114.114.114`：报文依次穿透 `100.68.X.1`（BRAS）-> `220.166.110.93`（城域网核心）-> `171.208.197.73`（省干骨干）-> `202.97.93.101`（ChinaNet 163 国家骨干网），链路完全打通；
+  - `ping6 2400:3200::1`（Alibaba DNS64）：时延 `44.2 ms`，0% 丢包，证明 IPv4/IPv6 双栈网络已 100% 具备出海能力。
+
+---
+
+### 3. 局域网二三层隔离死穴与硬件转发解封（网络 31 破局）
+光猫虽然拨通公网，但主机连接 LAN 口（Windows 显示为“网络 31”）却持续显示“无法访问 Internet”。现场排查揭示了华为 Dopra 体系一个隐蔽的架构死穴：
+
+#### 根因剖析：
+在出厂纯净配置模板（`hw_ctree.xml`）中，LAN1 至 LAN4 的端口工作模式默认被置为**纯二层桥接模式（Layer 2 Bridge）**，其底层键值为：
+```xml
+<LAN1 ... X_HW_L3Enable="0" ... />
+<LAN2 ... X_HW_L3Enable="0" ... />
+<LAN3 ... X_HW_L3Enable="0" ... />
+<LAN4 ... X_HW_L3Enable="0" ... />
+```
+当 `X_HW_L3Enable="0"` 时，海思硬件交换芯片（Switch ASIC）开启了硬件直通隔离规则，认为 LAN 口仅作为二层透传端口使用。PC 发出的数据包在芯片硬件层直接被拦截或广播，根本**不会送入 Linux 内核网络协议栈的 PREROUTING 链与 NAT 模块**，因此无法被路由至 `ppp257` 广域网出口！
+
+#### 实证破局操作：
+我们通过已建立的认证管理员 Web Session（`telecomadmin`），向后台 `set.cgi` 提交了显式的二/三层端口属性切换指令：
+```http
+POST /set.cgi?LAN1=InternetGatewayDevice.LANDevice.1.LANEthernetInterfaceConfig.1&LAN2=InternetGatewayDevice.LANDevice.1.LANEthernetInterfaceConfig.2&LAN3=InternetGatewayDevice.LANDevice.1.LANEthernetInterfaceConfig.3&LAN4=InternetGatewayDevice.LANDevice.1.LANEthernetInterfaceConfig.4&RequestFile=html/bbsp/layer3/layer3.asp HTTP/1.1
+Host: 192.168.100.1:8080
+Cookie: sid=...
+
+LAN1.X_HW_L3Enable=1&LAN2.X_HW_L3Enable=1&LAN3.X_HW_L3Enable=1&LAN4.X_HW_L3Enable=1&x.X_HW_Token=...
+```
+指令下发后，底层驱动即刻将 LAN1~LAN4 重新注册为三层路由端口，开启了与 `br0` 的 NAT 联动：
+- 主机端发起 Windows NCSI 主动探测：
+  `curl.exe -v --interface 192.168.100.2 http://www.msftconnecttest.com/connecttest.txt`
+- 立即返回 **`HTTP/1.1 200 OK` ("Microsoft Connect Test")**！
+- Windows 网络配置文件查询证实：
+  `Get-NetConnectionProfile -InterfaceIndex 9` -> **`IPv4Connectivity: Internet`, `IPv6Connectivity: Internet`**！
+
+---
+
+### 4. 双频无线射频配置重载与出厂凭据热注入
+重置后光猫的 Wi-Fi 恢复为默认广播 `WirelessNet` / `WirelessNet-5G`，且密钥未知。为了让家庭终端（手机、智能家居、平板）实现无感自动回连，我们展开了无线参数的热重载：
+
+1. **原厂无线凭据取证还原**：
+   通过审计前期提取的凭据资产库，锁定光猫原厂预设的 Wi-Fi 凭据：
+   - **2.4GHz 射频**：SSID `ChinaNet-SaUk`，信道 11 (Auto)，20MHz；
+   - **5GHz 射频**：SSID `ChinaNet-SaUk-5G`，信道 40 (Auto)，160MHz 满血频宽（11ax 2402 Mbps）；
+   - **无线预共享密钥**：`6u4c****`（WPA2-PSK AES 加密）。
+2. **底层平台命令热重配**：
+   在 Dopra Linux 特权 CLI（`SU_WAP>`）下调用原生无线配置接口：
+   ```text
+   set wlan basic laninst 1 wlaninst 1 ssid ChinaNet-SaUk
+   set wlan basic laninst 1 wlaninst 5 ssid ChinaNet-SaUk-5G
+   ```
+   随后在 Web 管理后台 `/html/amp/wlanbasic/WlanBasic.asp?2G` 与 `?5G` 表单中完成 WPA 预共享密钥 `6u4c****` 的热提交与持久化保存；
+3. **射频广播现场核验**：
+   调用 `display wifi information` 证实两个射频实体状态全绿：
+   ```text
+   ----------------------------------------------------
+   SSID Index                    :1
+   SSID                          :ChinaNet-SaUk
+   Enable                        :Enabled
+   Status                        :Up
+   Authentication Mode           :WPA2-PSK (AESEncryption)
+   ----------------------------------------------------
+   SSID Index                    :5
+   SSID                          :ChinaNet-SaUk-5G
+   Enable                        :Enabled
+   Status                        :Up
+   Channel bandwidth             :160 MHz (Standard: 11ax, Max Rate: 2402 M)
+   ----------------------------------------------------
+   ```
+4. **内核超频模块持续常驻**：
+   在此期间，我们自研构建的内核态硬件增强驱动 `ring0_gate.ko` 依然在内核中平稳运行，`/proc/ring0_gate` 实时读数保持就绪：
+   ```text
+   STATUS=READY
+   WIFI_PWR_PERCENT=200
+   WIFI_CHAIN_MASK=15
+   WIFI_RF_ADJ_DB=10
+   WIFI_OVERDRIVE=2
+   ```
+   2.4G 与 5G 射频功率持续以 200%（30 dBm / 1000 mW）稳定激发，保障大平层全屋强信号覆盖。
+
+---
+
+### 5. 客户端复合网络干扰深度定界（Clash Verge TUN 假死剖析）
+在物理链路和无线全面复活后，用户反馈 PC 端任务栏网络弹窗中“网络 31 依然显示无法访问 Internet”。现场通过严谨的路由表交叉溯源，精准定位了客户端宿主机的复合干扰源：
+
+1. **Clash Verge (Mihomo) TUN 模式的路由劫持与黑洞**：
+   - 现场查询 PC 默认路由：`Find-NetRoute -RemoteIPAddress '114.114.114.114'` 显示所有外网流量的实际下一跳均被定向至网卡 `Mihomo`（IP `198.18.0.1`，Metric `0`）；
+   - 由于光猫此前经历过断网恢复，Mihomo 内部的代理节点连接因心跳断开而全部假死，弹窗中明确可见 **`Mihomo 无法访问 Internet`**；
+   - Mihomo 劫持了整个协议栈的 `0.0.0.0/0`，导致 Windows 自身的 NCSI 网络连通性探测请求被 TUN 网卡直接丢弃，造成“网络 31 无法访问”的系统误报假象；
+2. **多网卡路由度量值（Metric）竞争**：
+   - 早期为了临时连网而插入的手机 USB 共享网络（“网络 32”，网卡跃点 25）在 Windows 路由表中优先级高于以太网“网络 31”（总跃点 281）；
+   - Windows 11 在多网卡环境下，仅将唯一处于主出口状态且探测成功的网卡点亮，其余从属网卡在代理异常截胡时一律挂起显示为黄色受限；
+3. **闭环结论**：
+   光猫端网络链路已完全 100% 正常。客户端只需轻触开关重启 Clash Verge 的 TUN 模式或拔除临时手机 USB，网络 31 即刻全面接管千兆高速生产流量。
+
+---
+
+## 0x0B 总结与方法论反思
 
 回顾这 50 个小时在华为 HN8145X6N 上的深度攻坚，有以下几点关键经验可供嵌入式底层安全研究参考：
 
