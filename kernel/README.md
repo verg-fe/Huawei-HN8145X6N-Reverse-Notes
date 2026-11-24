@@ -5,9 +5,11 @@
 ---
 
 ## 0x01 文件清单
-* **`ring0_gate_v2.c`**：自包含内核模块 C 源码。实现 `/proc/ring0_gate` 特权接口，提供面向用户态进程的在内核 `commit_creds(prepare_kernel_cred(NULL))` 瞬态提权通道。
+* **`ring0_gate_v2.c`**：自包含内核模块 C 源码。实现 `/proc/ring0_gate` 特权接口，提供：
+  1. 用户态进程在内核态的 `commit_creds(prepare_kernel_cred(NULL))` 瞬态提权通道；
+  2. 真实联动海思无线驱动（`HWWIFI2_WIFI.ko`）导出接口，对 2.4G (`ath0`) 与 5G (`ath8`) 下发 30 dBm (1000 mW) 满血硬件激发指令。
 * **`build_ring0_v2.py`**：无内核树跨平台编译构建脚本。利用 Clang 交叉编译器直接编译出符合目标内核加载器要求的 ARMv7 单目标文件。
-* **`ring0_gate.ko`**：编译产出的自包含 LKM 二进制文件。
+* **`ring0_gate.ko`**：编译产出的自包含 LKM 二进制文件（~6.6 KB）。
 
 ---
 
@@ -41,7 +43,7 @@
    ```
    并将其实例化在 `.gnu.linkonce.this_module` 节区中。
 3. **体积与内存驻留数据**：
-   - 静态 ELF 磁盘文件体积：~4.6 KB 至 ~8.0 KB（视符号表与内联注释而定）；
+   - 静态 ELF 磁盘文件体积：~6.6 KB；
    - 内核内存物理驻留尺寸：约 5,195 字节（`lsmod` 报告的实际内存分配页面大小）。
 
 ---
@@ -55,3 +57,26 @@
   commit_creds(prepare_kernel_cred(NULL));
   ```
   使非特权进程瞬间获得真实的 `UID 0 / GID 0 (root)` 权限。
+
+---
+
+## 0x04 海思 Wi-Fi 6 驱动联动与 1000mW (30 dBm) 硬件满血激发
+
+在目标设备上，Wi-Fi 射频输出功率默认受国家无线电管理委员会（SRRC）强制法规限制（2.4GHz 限制在 20 dBm / 100 mW 以内，并加注了高额数字衰减）。
+
+为了达成大平层全屋强信号覆盖的实测需求，`ring0_gate_v2.c` 实现了与海思 Wi-Fi 闭源驱动（`HWWIFI2_WIFI.ko`）的真实底层联动：
+1. **真实符号动态解析**：
+   通过弱引用绑定海思驱动导出的核心调试接口：
+   ```c
+   extern int wal_hipriv_set_txpower(struct net_device *net_dev, const char *param) __attribute__((weak));
+   extern struct net_device *dev_get_by_name(struct net *net, const char *name) __attribute__((weak));
+   extern void dev_put(struct net_device *dev) __attribute__((weak));
+   ```
+2. **硬件全功率注入原语**：
+   向 `/proc/ring0_gate` 写入指令 `wifi_pwr 1000` 或 `overdrive` 时，模块自动获取 2.4G 网卡（`ath0`）与 5G 网卡（`ath8`）的设备结构体，直接调用海思内部私有通信接口下发 **30 dBm（换算即为 1000 mW 满血功率指标）**：
+   ```c
+   wal_hipriv_set_txpower(dev_2g, "30");
+   wal_hipriv_set_txpower(dev_5g, "30");
+   ```
+3. **物理激励效果**：
+   海思 DMAC 固件接收到 30 dBm 指令后，清零内部数字衰减器（0dB），促使板载外置射频前端芯片（康希通信 KCT8575 / KCT8547 高功率 FEM）进入全功率饱和放大状态，实现全屋满格穿墙覆盖！

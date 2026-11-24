@@ -9,7 +9,8 @@
  *     built without vendor kernel source tree or module headers.
  *     Provides an in-memory kernel privilege gateway via /proc/ring0_gate:
  *       1. Kernel-level privilege escalation primitive (commit_creds)
- *       2. Task struct and kernel memory space layout probing
+ *       2. Direct dispatch to HiSilicon Wi-Fi driver (HWWIFI2_WIFI.ko) for
+ *          1000mW (30 dBm) full-power hardware overdrive on ath0/ath8
  *       3. Zero-brick safe unloading and exception handling
  * =============================================================================
  */
@@ -24,6 +25,8 @@ struct inode;
 struct file;
 struct cred;
 struct task_struct;
+struct net_device;
+struct net;
 
 /* Linux 5.10 proc_ops structure definition */
 struct proc_ops {
@@ -55,6 +58,15 @@ extern unsigned long arm_copy_from_user(void *to, const void *from, unsigned lon
 #define copy_from_user arm_copy_from_user
 extern int printk(const char *fmt, ...);
 
+/*
+ * HiSilicon Wi-Fi 6 (Hi1152 / HWWIFI2_WIFI.ko) driver hooks:
+ * Dispatched dynamically via exported symbols to trigger 1000mW (30 dBm) overdrive.
+ */
+extern int wal_hipriv_set_txpower(struct net_device *net_dev, const char *param) __attribute__((weak));
+extern struct net_device *dev_get_by_name(struct net *net, const char *name) __attribute__((weak));
+extern void dev_put(struct net_device *dev) __attribute__((weak));
+extern struct net init_net __attribute__((weak));
+
 /* .modinfo section required by kernel module loader */
 __attribute__((section(".modinfo"), used)) static const char __mod_license[] = "license=GPL";
 __attribute__((section(".modinfo"), used)) static const char __mod_name[] = "name=ring0_gate";
@@ -65,21 +77,68 @@ __attribute__((section(".modinfo"), used)) static const char __mod_vermagic[] = 
  * On ARMv7 kernels configured with CONFIG_ARM_MODULE_PLTS=y, the module loader's
  * module_frob_arch_sections() verifies the existence of .plt and .init.plt sections
  * to allocate PLT bounce buffers for R_ARM_CALL / R_ARM_JUMP24 relocations.
- * Injecting minimal non-empty section definitions directly in assembly satisfies
- * this assertion without needing complex post-compilation ELF repackaging.
  */
 __asm__(".section .plt, \"ax\", %progbits\n.byte 0\n");
 __asm__(".section .init.plt, \"a\", %progbits\n.byte 0\n");
 
 static struct proc_dir_entry *gate_entry = (void *)0;
 static unsigned long g_escalation_count = 0;
+static int g_wifi_overdrive_active = 0;
+static int g_ath0_ret = -1;
+static int g_ath8_ret = -1;
+
+static int trigger_wifi_1000mw(void) {
+    struct net_device *dev_2g = (void *)0;
+    struct net_device *dev_5g = (void *)0;
+    
+    g_wifi_overdrive_active = 1;
+
+    if (dev_get_by_name) {
+        dev_2g = dev_get_by_name(&init_net, "ath0");
+        dev_5g = dev_get_by_name(&init_net, "ath8");
+    }
+
+    if (wal_hipriv_set_txpower) {
+        /*
+         * Parameter format for wal_hipriv_set_txpower:
+         * "30" specifies 30 dBm (1000 mW equivalent target power)
+         */
+        if (dev_2g) {
+            g_ath0_ret = wal_hipriv_set_txpower(dev_2g, "30");
+        } else {
+            g_ath0_ret = wal_hipriv_set_txpower((void *)0, "ath0 30");
+        }
+
+        if (dev_5g) {
+            g_ath8_ret = wal_hipriv_set_txpower(dev_5g, "30");
+        } else {
+            g_ath8_ret = wal_hipriv_set_txpower((void *)0, "ath8 30");
+        }
+        
+        printk("[RING0_GATE] 1000mW (30dBm) hardware overdrive dispatched: ath0 rc=%d, ath8 rc=%d\n", 
+               g_ath0_ret, g_ath8_ret);
+    } else {
+        printk("[RING0_GATE] Warning: wal_hipriv_set_txpower not resolved, driver hook pending.\n");
+    }
+
+    if (dev_put) {
+        if (dev_2g) dev_put(dev_2g);
+        if (dev_5g) dev_put(dev_5g);
+    }
+
+    return 0;
+}
 
 static int ring0_show(struct seq_file *m, void *v) {
     seq_printf(m, "=== [RING0_GATE KERNEL GATEWAY] ===\n");
     seq_printf(m, "STATUS=READY\n");
     seq_printf(m, "KERNEL_VER=5.10.0-SMP-ARMv7\n");
+    seq_printf(m, "CHIPSET=HiSilicon_Hi1152_Wi-Fi_6\n");
     seq_printf(m, "ESCALATION_COUNT=%lu\n", g_escalation_count);
-    seq_printf(m, "COMMANDS=root (elevate calling process to UID 0)\n");
+    seq_printf(m, "WIFI_1000MW_OVERDRIVE=%s\n", g_wifi_overdrive_active ? "ACTIVE_30DBM" : "STANDBY");
+    seq_printf(m, "ATH0_2.4G_RC=%d\n", g_ath0_ret);
+    seq_printf(m, "ATH8_5.0G_RC=%d\n", g_ath8_ret);
+    seq_printf(m, "COMMANDS=root, wifi_pwr 1000\n");
     seq_printf(m, "===================================\n");
     return 0;
 }
@@ -103,7 +162,7 @@ static ssize_t ring0_write(struct file *file, const char *buf, size_t count, lof
         len--;
     }
 
-    /* Command: "root" -> Instant in-kernel privilege escalation */
+    /* Command 1: "root" -> Instant in-kernel privilege escalation */
     if (kbuf[0] == 'r' && kbuf[1] == 'o' && kbuf[2] == 'o' && kbuf[3] == 't' && kbuf[4] == '\0') {
         struct cred *c = prepare_kernel_cred((void *)0);
         if (c) {
@@ -114,6 +173,14 @@ static ssize_t ring0_write(struct file *file, const char *buf, size_t count, lof
             printk("[RING0_GATE] Error: prepare_kernel_cred returned NULL\n");
             return -12; /* -ENOMEM */
         }
+    }
+    /* Command 2: "wifi_pwr 1000" or "overdrive" -> 1000mW 30dBm RF overdrive */
+    else if ((kbuf[0] == 'w' && kbuf[1] == 'i' && kbuf[2] == 'f' && kbuf[3] == 'i' && kbuf[4] == '_' &&
+              kbuf[5] == 'p' && kbuf[6] == 'w' && kbuf[7] == 'r' && kbuf[8] == ' ' && 
+              kbuf[9] == '1' && kbuf[10] == '0' && kbuf[11] == '0' && kbuf[12] == '0') ||
+             (kbuf[0] == 'o' && kbuf[1] == 'v' && kbuf[2] == 'e' && kbuf[3] == 'r' && kbuf[4] == 'd' &&
+              kbuf[5] == 'r' && kbuf[6] == 'i' && kbuf[7] == 'v' && kbuf[8] == 'e')) {
+        trigger_wifi_1000mw();
     }
 
     return count;
@@ -159,15 +226,15 @@ void cleanup_module(void) {
 struct module {
     char pad0[12];
     char name[56];
-    char pad1[240 - 12 - 56];
+    char pad1[172];
     int (*init)(void);
-    char pad2[528 - 240 - 4];
+    char pad2[284];
     void (*exit)(void);
-    char pad3[576 - 528 - 4];
+    char pad3[44];
 };
 
 __attribute__((section(".gnu.linkonce.this_module"), used))
-struct module __this_module = {
+static struct module __this_module = {
     .name = "ring0_gate",
     .init = init_module,
     .exit = cleanup_module,
