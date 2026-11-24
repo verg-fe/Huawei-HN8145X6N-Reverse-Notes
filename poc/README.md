@@ -5,6 +5,7 @@
 ---
 
 ## 0x01 文件清单
+* **`delivery_server_8888.py`**：轻量级局域网文件投递 HTTP 服务器（8888 端口）。专为向光猫投递 Root 脚本（`run_root.sh`）与内核驱动（`ring0_gate.ko`）设计，具备精准客户端 IP 跟踪、CORS 支持与即时分发能力。
 * **`appmgr_dbus_pwn.py`**：利用局域网开放的 `17998/tcp` 端口（SAF CloudClient JSON-RPC）或宿主 D-Bus 系统总线向核心特权守护进程 `/sbin/appmgr` 发起结构化消息注入，触发 root 脚本派生的自动化全流程脚本。
 * **`poc_root.sh`**：在容器 root（UID 0）环境中执行的探针载荷，负责物理装载 `ring0_gate.ko` 并拉起调试 Telnetd 监听。
 
