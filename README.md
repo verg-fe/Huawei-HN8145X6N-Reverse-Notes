@@ -1264,6 +1264,56 @@ LAN1.X_HW_L3Enable=1&LAN2.X_HW_L3Enable=1&LAN3.X_HW_L3Enable=1&LAN4.X_HW_L3Enabl
 3. **闭环结论**：
    光猫端网络链路已完全 100% 正常。客户端只需轻触开关重启 Clash Verge 的 TUN 模式或拔除临时手机 USB，网络 31 即刻全面接管千兆高速生产流量。
 
+### 6. 运营商深层常驻后门与 m01_b01 抓包探针的彻底切除
+
+在完成了特权通道与硬件极限激发后，我们对光猫内部潜藏的运营商全家桶监控链路实施了深度清查，挖出了深藏于用户态与 Ring 0 内核态的多重探针：
+
+#### (1) `m01_b01`：深藏内核态的 HTTP / 原始数据包（rawpkt）审计模块
+在内核模块列表 (`lsmod`) 中常驻着体积达 116 KB 的专有模块 `m01_b01`。逆向分析其组件结构与配置文件 `/mnt/jffs2/plug/apps/apps/opt/preinstall/b01odmv3/files/config`：
+```json
+{
+    "__conf_init__": [
+        {   
+            "type": "__svr_data",
+            "addr": ["b01-data-reported.189cube.com:7890"],
+            "buffer":100,
+            "period": 1800
+        },  
+        {   
+            "type": "__oper_data",
+            "rules": [
+                {"addr":"b01.189cube.com:7870","filter":["rawpkt"],"period":600}
+            ]
+        }
+    ]
+}
+```
+* **技术危害**：
+  - **`m01-b01.ko`**：直接挂钩内核网络过滤链，实现 `http filter`、`hfilter_match_rule` 与 `rawpkt` 原始报文嗅探；
+  - **`m01-b01-inner`**：单进程独占高达 **34 MB 物理内存**，定时向天翼智慧家庭平台（`189cube.com`）全量上报终端访问与网络报文特征。
+* **安全卸载与物理除活**：
+  ```bash
+  # 1. 内核级安全卸载（该模块内置了 cleanup_module）
+  rmmod m01_b01
+  # dmesg 回显：Bye - this is the kernel b01 unload by m01-b01
+  
+  # 2. 剥离执行权限并重命名模块，防止开机再次装载
+  chmod 000 /mnt/jffs2/plug/apps/apps/opt/preinstall/b01odmv3/files/m01-b01-inner
+  chmod 000 /mnt/jffs2/plug/apps/apps/opt/preinstall/b01odmv3/files/b01odmv3
+  mv /mnt/jffs2/plug/apps/apps/opt/preinstall/b01odmv3/files/m01-b01.ko /mnt/jffs2/plug/apps/apps/opt/preinstall/b01odmv3/files/m01-b01.ko.disabled
+  ```
+
+#### (2) 天翼云控与小翼管家探针全家桶斩断
+* **涉及进程**：`/sbin/cloudclient`、`/sbin/cloudclocal`、`/files/opmaintainv3`、`/files/xrobotv3`；
+* **处置操作**：
+  1. 拔除自启链：删除 `/mnt/jffs2/plug/apps/apps/etc/rc.d/S16cloudclt` 与 `S20vpnclient`；
+  2. 权限冻结：对上述所有监控二进制赋予 `chmod 000`；
+  3. 域名黑洞化：在 `/etc/hosts` 中将 `devacs.edatahome.com`、`b01-data-reported.189cube.com`、`189cube.com` 全部重定向至 `127.0.0.1`。
+
+#### (3) 效果验证
+* 彻底清理后，光猫系统空闲可用物理内存从原先的 ~60 MB 暴增至 **103 MB**（释放超 40MB 内存占用）；
+* 运营商对光猫的远程推送、静默改密、HTTP 劫持与原始数据包上报通道被全链条物理切断，宽带与 Wi-Fi 传输延迟稳定在 13 ms，零丢包。
+
 ---
 
 ## 0x0B 总结与方法论反思
